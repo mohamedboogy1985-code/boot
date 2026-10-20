@@ -1,0 +1,6 @@
+{
+  "name": "ChatterBots Remix - وكيل الذكاء الاصطناعي المحاسبي",
+  "description": "منصة وكلاء الذكاء الاصطناعي الصوتية التفاعلية ChatterBots مع إمكانية التخصيص، والتسجيل المحلي للمحادثات، والإدماج في برامج الحسابات.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
