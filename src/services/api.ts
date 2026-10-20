@@ -6,7 +6,17 @@ import {
   TranscriptFinancialAnalysis,
   WebScrapeResult,
   WindowsAutomationScript,
-  AgentExecutionLog
+  AgentExecutionLog,
+  OrchestrationResult,
+  RealDiagnostics,
+  OllamaStatus,
+  OllamaToolResult,
+  AuditLogItem,
+  CurrencyCode,
+  AdaptersStateResponse,
+  AdapterProposalResponse,
+  AdapterExecuteResult,
+  AdapterActionProposal
 } from '../types';
 
 export interface ChatResponse {
@@ -47,6 +57,7 @@ export const ApiService = {
         cpus: 8,
         memory: { totalMB: 16384, usedMB: 7120, freeMB: 9264, usedPercentage: 43 },
         uptimeHours: '12.4',
+        simulated: true,
         capabilities: {
           webScraping: true,
           windowsPowerShellGenerator: true,
@@ -56,6 +67,82 @@ export const ApiService = {
           agentAutonomousToolUse: true,
         },
       };
+    }
+  },
+
+  // Real system diagnostics via `systeminformation` (merged from Bogy-Agants)
+  async getRealDiagnostics(): Promise<RealDiagnostics> {
+    const res = await fetch('/api/system/real-diagnostics');
+    if (!res.ok) {
+      throw new Error('Real diagnostics failed');
+    }
+    return await res.json();
+  },
+
+  // Multi-agent orchestration: decompose one goal into delegated agent tasks
+  async orchestrateTask(
+    goal: string,
+    bot?: ChatterBot,
+    userProfile?: UserProfile
+  ): Promise<OrchestrationResult> {
+    const res = await fetch('/api/orchestrator/dispatch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ goal, bot, userProfile }),
+    });
+
+    if (!res.ok) {
+      throw new Error('Orchestration failed');
+    }
+
+    return await res.json();
+  },
+
+  // Ollama local AI bridge status (offline-first; server degrades gracefully)
+  async getOllamaStatus(): Promise<OllamaStatus> {
+    try {
+      const res = await fetch('/api/ollama/status');
+      if (!res.ok) throw new Error('Ollama status failed');
+      return await res.json();
+    } catch {
+      return {
+        isConnected: false,
+        host: 'http://localhost:11434',
+        message: 'خادم API غير متاح — يتعذر التحقق من حالة Ollama المحلي.',
+        models: [],
+      };
+    }
+  },
+
+  // Run a guarded Ollama tool (generation happens only when Ollama is online)
+  async runOllamaTool(
+    tool: string,
+    prompt: string,
+    model?: string
+  ): Promise<OllamaToolResult> {
+    const res = await fetch('/api/ollama/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tool, prompt, model }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Ollama tool failed' }));
+      throw new Error(err.error || 'Ollama tool failed');
+    }
+
+    return await res.json();
+  },
+
+  // Security audit log (every control action is recorded server-side)
+  async getAuditLog(): Promise<AuditLogItem[]> {
+    try {
+      const res = await fetch('/api/system/audit-log');
+      if (!res.ok) throw new Error('Audit log failed');
+      const data = await res.json();
+      return data.items ?? [];
+    } catch {
+      return [];
     }
   },
 
@@ -117,15 +204,16 @@ export const ApiService = {
     return data.log;
   },
 
-  // Financial Transcript Analyzer with Gemini
+  // Financial Transcript Analyzer with Gemini (Egypt-first accounting profile)
   async analyzeTranscript(
     session: ConversationSession,
-    userProfile: UserProfile
+    userProfile: UserProfile,
+    currency: CurrencyCode = 'EGP'
   ): Promise<TranscriptFinancialAnalysis> {
     const res = await fetch('/api/analyze-transcript', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session, userProfile }),
+      body: JSON.stringify({ session, userProfile, currency }),
     });
 
     if (!res.ok) {
@@ -200,5 +288,65 @@ export const ApiService = {
       console.warn('TTS fetch failed:', err);
       return { audioData: null, fallbackWebSpeech: true };
     }
+  },
+
+  /* ===== Safe Adapters (browser / files / mouse / keyboard / windows) =====
+   * The LLM may only PROPOSE actions; executeAdapterAction must be called
+   * from an explicit user approval click in the UI, never automatically. */
+
+  async getAdaptersState(): Promise<AdaptersStateResponse> {
+    const res = await fetch('/api/adapters/state');
+    if (!res.ok) throw new Error('Adapters state failed');
+    return await res.json();
+  },
+
+  async configureBrowserAdapter(userAgentPreset: string, timeoutMs: number): Promise<any> {
+    const res = await fetch('/api/adapters/browser/configure', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userAgentPreset, timeoutMs }),
+    });
+    if (!res.ok) throw new Error('Browser adapter configure failed');
+    return await res.json();
+  },
+
+  async proposeAdapterActions(
+    goal: string,
+    source: 'user' | 'ollama' = 'user'
+  ): Promise<AdapterProposalResponse> {
+    const res = await fetch('/api/adapters/propose', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ goal, source }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Adapter propose failed' }));
+      throw new Error(err.error || 'Adapter propose failed');
+    }
+    return await res.json();
+  },
+
+  /** Execute ONE action — call ONLY after explicit per-action user approval. */
+  async executeAdapterAction(
+    action: AdapterActionProposal,
+    approvedByUser: boolean
+  ): Promise<AdapterExecuteResult> {
+    const res = await fetch('/api/adapters/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: { adapter: action.adapter, action: action.action, params: action.params },
+        approvedByUser,
+      }),
+    });
+    const data = await res.json().catch(() => ({
+      executed: false,
+      simulated: false,
+      summary: 'تعذر الاتصال بخادم المحوّلات.',
+    }));
+    if (!res.ok && !data.summary) {
+      data.summary = data.error || 'فشل تنفيذ إجراء المحوّل.';
+    }
+    return { adapter: action.adapter, action: action.action, ...data };
   },
 };

@@ -32,6 +32,13 @@ import {
   AgentExecutionLog 
 } from '../types';
 import { ApiService } from '../services/api';
+import {
+  OrchestratorPanel,
+  AdaptersPanel,
+  OllamaPanel,
+  RealDiagnosticsPanel,
+  SecurityAuditPanel,
+} from './MergedControlPanels';
 
 interface DeepControlHubProps {
   activeBot: ChatterBot;
@@ -44,7 +51,7 @@ export const DeepControlHub: React.FC<DeepControlHubProps> = ({
   allBots,
   userProfile,
 }) => {
-  const [activeTab, setActiveTab] = useState<'windows' | 'web' | 'agents' | 'system'>('windows');
+  const [activeTab, setActiveTab] = useState<'windows' | 'web' | 'agents' | 'orchestrator' | 'adapters' | 'ollama' | 'system' | 'diagnostics' | 'security'>('windows');
   
   // Windows Control State
   const [scriptPrompt, setScriptPrompt] = useState('أتمتة إنشاء تقرير محاسبي في مايكروسوفت إكسل وتنسيق الجداول');
@@ -299,6 +306,66 @@ export const DeepControlHub: React.FC<DeepControlHubProps> = ({
         >
           <Activity className="w-4 h-4" />
           <span>بيانات النظام والعتاد (Diagnostics)</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('orchestrator')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold transition-all shrink-0 ${
+            activeTab === 'orchestrator'
+              ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+          }`}
+        >
+          <Sparkles className="w-4 h-4" />
+          <span>المُنسّق متعدد الوكلاء (صوت + نص)</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('adapters')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold transition-all shrink-0 ${
+            activeTab === 'adapters'
+              ? 'bg-gradient-to-r from-amber-600 to-orange-600 text-white shadow-lg'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+          }`}
+        >
+          <Terminal className="w-4 h-4" />
+          <span>المحوّلات الآمنة (فأرة/كيبورد/متصفح)</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('ollama')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold transition-all shrink-0 ${
+            activeTab === 'ollama'
+              ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-lg'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+          }`}
+        >
+          <Cpu className="w-4 h-4" />
+          <span>ذكاء Ollama المحلي</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('diagnostics')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold transition-all shrink-0 ${
+            activeTab === 'diagnostics'
+              ? 'bg-gradient-to-r from-cyan-600 to-teal-600 text-white shadow-lg'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+          }`}
+        >
+          <Server className="w-4 h-4" />
+          <span>التشخيص الحقيقي للعتاد</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('security')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold transition-all shrink-0 ${
+            activeTab === 'security'
+              ? 'bg-gradient-to-r from-emerald-600 to-green-600 text-white shadow-lg'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+          }`}
+        >
+          <ShieldAlert className="w-4 h-4" />
+          <span>الحارس الأمني وسجل التدقيق</span>
         </button>
       </div>
 
@@ -845,6 +912,23 @@ export const DeepControlHub: React.FC<DeepControlHubProps> = ({
 
         </div>
       )}
+
+      {/* TAB: MULTI-AGENT ORCHESTRATOR (Voice + Text via VoiceController) */}
+      {activeTab === 'orchestrator' && (
+        <OrchestratorPanel activeBot={activeBot} userProfile={userProfile} />
+      )}
+
+      {/* TAB: SAFE ADAPTERS (mouse / keyboard / browser / files) */}
+      {activeTab === 'adapters' && <AdaptersPanel />}
+
+      {/* TAB: OLLAMA LOCAL AI BRIDGE */}
+      {activeTab === 'ollama' && <OllamaPanel />}
+
+      {/* TAB: REAL HARDWARE DIAGNOSTICS */}
+      {activeTab === 'diagnostics' && <RealDiagnosticsPanel />}
+
+      {/* TAB: SECURITY GUARDRAILS & AUDIT LOG */}
+      {activeTab === 'security' && <SecurityAuditPanel />}
 
     </div>
   );

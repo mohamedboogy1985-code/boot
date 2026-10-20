@@ -86,6 +86,117 @@ export interface TranscriptFinancialAnalysis {
   taxDeductions: TaxDeductionInsight[];
   transactions: FinancialItem[];
   recommendations?: string[];
+  /** true when produced by the local heuristic engine (no live Gemini analysis) */
+  isSimulated?: boolean;
+}
+
+/* =====================================================
+ * Merged from Bogy-Agants (NexusAI) — Multi-Agent Orchestrator
+ * ===================================================== */
+
+export interface OrchestratorTask {
+  agentId: 'adam' | 'amira' | 'paul' | 'charlotte' | 'shane' | 'penny' | 'windows' | 'web' | 'analysis';
+  taskTitle: string;
+  instruction: string;
+  expectedArtifact: string;
+  status: 'pending' | 'in-progress' | 'completed';
+}
+
+export interface OrchestrationResult {
+  planSummary: string;
+  speechResponse: string;
+  delegatedTasks: OrchestratorTask[];
+  simulated?: boolean;
+  createdAt: number;
+}
+
+/* =====================================================
+ * Real system diagnostics (systeminformation)
+ * ===================================================== */
+
+export interface RealDiagnosticsProcess {
+  pid: number;
+  name: string;
+  cpu: number;
+  ramMb: number;
+  status: string;
+}
+
+export interface RealDiagnostics {
+  cpu: {
+    manufacturer: string;
+    brand: string;
+    speed: number;
+    cores: number;
+    loadPercent: number;
+  };
+  memory: {
+    totalMb: number;
+    usedMb: number;
+    freeMb: number;
+    usedPercent: number;
+  };
+  os: {
+    platform: string;
+    distro: string;
+    release: string;
+    arch: string;
+    hostname: string;
+    uptimeHours: number;
+  };
+  storage: {
+    fs: string;
+    sizeGb: number;
+    usedGb: number;
+    usePercent: number;
+    mount: string;
+  }[];
+  processes: RealDiagnosticsProcess[];
+  timestamp: string;
+  simulated?: boolean;
+}
+
+/* =====================================================
+ * Ollama local AI bridge (offline-first)
+ * ===================================================== */
+
+export interface OllamaModelInfo {
+  name: string;
+  displayName: string;
+  size: string;
+  family: string;
+  recommended: boolean;
+}
+
+export interface OllamaStatus {
+  isConnected: boolean;
+  host: string;
+  message?: string;
+  models: OllamaModelInfo[];
+  engine?: string;
+}
+
+export interface OllamaToolResult {
+  tool: string;
+  executed: boolean;
+  summary: string;
+  detail?: string;
+  explanation: string;
+}
+
+/* =====================================================
+ * Security guardrails & audit log
+ * ===================================================== */
+
+export interface AuditLogItem {
+  id: string;
+  timestamp: number;
+  category: 'web' | 'windows_script' | 'agent' | 'ollama' | 'system';
+  action: string;
+  target: string;
+  riskLevel: 'low' | 'medium' | 'blocked';
+  status: 'allowed' | 'blocked';
+  reason: string;
 }
 
 export interface AccountingInvoice {
@@ -144,4 +255,57 @@ export interface AgentExecutionLog {
   summary: string;
   outputPreview?: string;
   details?: any;
+}
+
+/* ===== Multi-currency (Egypt-first) ===== */
+export type CurrencyCode = 'EGP' | 'USD' | 'SAR';
+
+/* ===== Safe Adapters (human-approved, LLM proposes only) ===== */
+export type AdapterName = 'mouse' | 'keyboard' | 'browser' | 'filesystem' | 'windows' | 'system';
+
+export interface AdapterActionProposal {
+  id: string;
+  adapter: AdapterName;
+  action: string;
+  params: Record<string, any>;
+  rationale: string;
+  riskLevel: 'low' | 'medium';
+  status: 'awaiting-approval' | 'executing' | 'done' | 'rejected';
+}
+
+export interface AdapterProposalResponse {
+  proposalId: string;
+  goal: string;
+  engine: string;
+  simulated: boolean;
+  requiresUserApprovalForEveryAction: boolean;
+  note: string;
+  actions: AdapterActionProposal[];
+}
+
+export interface AdapterStateInfo {
+  id: AdapterName;
+  nameAr: string;
+  mode: 'enabled' | 'dry-run';
+  requiresApproval: boolean;
+  capabilities: string[];
+  notes: string;
+}
+
+export interface AdaptersStateResponse {
+  shellExecutionEnabled: boolean;
+  desktopAdaptersEnabled: boolean;
+  loopbackOnlyForDesktopInput: boolean;
+  sandboxDirName: string;
+  browserConfig: { userAgentPreset: string; timeoutMs: number; userAgent: string };
+  adapters: AdapterStateInfo[];
+}
+
+export interface AdapterExecuteResult {
+  adapter: string;
+  action: string;
+  executed: boolean;
+  simulated: boolean;
+  summary: string;
+  detail?: string;
 }
