@@ -1,0 +1,52 @@
+diff --git a/package.json b/package.json
+index d5d2c0e..9871135 100644
+--- a/package.json
++++ b/package.json
+@@ -6,7 +6,7 @@
+   "scripts": {
+     "dev": "tsx server.ts",
+     "build": "vite build",
+-    "start": "node server.ts",
++    "start": "NODE_ENV=production tsx server.ts",
+     "preview": "vite preview",
+     "clean": "rm -rf dist server.js",
+     "lint": "tsc --noEmit"
+@@ -25,6 +25,7 @@
+     "motion": "^12.23.24",
+     "react": "^19.0.1",
+     "react-dom": "^19.0.1",
++    "react-is": "^19.0.1",
+     "recharts": "^3.10.1",
+     "systeminformation": "^5.33.16",
+     "vite": "^8.3.0",
+@@ -35,7 +36,6 @@
+     "@types/react": "^19.3.0",
+     "@types/react-dom": "^19.3.0",
+     "autoprefixer": "^10.4.21",
+-    "esbuild": "^0.25.0",
+     "tailwindcss": "^4.3.3",
+     "tsx": "^4.21.0",
+     "typescript": "^7.0.2",
+diff --git a/server.ts b/server.ts
+index 205c110..ca33866 100644
+--- a/server.ts
++++ b/server.ts
+@@ -666,6 +666,18 @@ app.get('/api/system/real-diagnostics', async (_req: Request, res: Response) =>
+ 
+ // 7. Real Command Execution Endpoint (PowerShell / Shell execution)
+ app.post('/api/system/execute-command', (req: Request, res: Response) => {
++  // SECURITY PATCH: shell execution is DISABLED by default. It only runs when
++  // the operator explicitly sets ENABLE_UNSAFE_SHELL_EXECUTION=true AND the
++  // request comes from the same machine (loopback). The project this code was
++  // merged into (boot/ChatterBots Remix) removes this endpoint entirely.
++  const remoteAddress = String(req.socket?.remoteAddress || '');
++  const isLoopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remoteAddress);
++  if (process.env.ENABLE_UNSAFE_SHELL_EXECUTION !== 'true' || !isLoopback) {
++    return res.status(403).json({
++      error: 'تنفيذ الأوامر معطّل افتراضيًا لحماية النظام. فعّله محليًا فقط عبر ENABLE_UNSAFE_SHELL_EXECUTION=true ومن نفس الجهاز.',
++      disabled: true,
++    });
++  }
+   const { command, actionType = 'powershell' } = req.body;
+ 
+   if (!command || typeof command !== 'string') {

@@ -29,6 +29,15 @@ import {
 import { ApiService } from '../services/api';
 import { LocalDB } from '../services/localDb';
 import { FinancialDistributionCharts } from './FinancialDistributionCharts';
+import {
+  exportAnalysisToXlsx,
+  exportAnalysisToDocx,
+  exportAnalysisToCsv,
+  exportAnalysisToPdfViaPrint,
+} from '../services/fileExportService';
+import { CURRENCIES } from '../services/currency';
+import { NotificationService } from '../services/notificationService';
+import type { CurrencyCode } from '../types';
 
 interface FinancialTranscriptAnalyzerProps {
   userProfile: UserProfile;
@@ -38,6 +47,7 @@ interface FinancialTranscriptAnalyzerProps {
   selectedSessionId?: string;
   onSelectSessionId?: (id: string) => void;
   onAnalysisComplete?: (sessionId: string, result: TranscriptFinancialAnalysis) => void;
+  currency?: CurrencyCode;
 }
 
 export const FinancialTranscriptAnalyzer: React.FC<FinancialTranscriptAnalyzerProps> = ({
@@ -48,6 +58,7 @@ export const FinancialTranscriptAnalyzer: React.FC<FinancialTranscriptAnalyzerPr
   selectedSessionId: propSelectedSessionId,
   onSelectSessionId: propOnSelectSessionId,
   onAnalysisComplete,
+  currency = 'EGP',
 }) => {
   const [internalSessions, setInternalSessions] = useState<ConversationSession[]>([]);
   const sessions = propSessions || internalSessions;
@@ -123,7 +134,9 @@ export const FinancialTranscriptAnalyzer: React.FC<FinancialTranscriptAnalyzerPr
     setErrorMessage(null);
 
     try {
-      const result = await ApiService.analyzeTranscript(session, userProfile);
+      void NotificationService.requestPermission();
+      const result = await ApiService.analyzeTranscript(session, userProfile, currency);
+      NotificationService.notifyAnalysisComplete(session.title, Boolean(result.isSimulated));
       setAnalysis(result);
       // Persist analysis into the session
       await LocalDB.saveFinancialAnalysis(session.id, result);
@@ -248,6 +261,15 @@ export const FinancialTranscriptAnalyzer: React.FC<FinancialTranscriptAnalyzerPr
                   {new Date(analysis.analyzedAt).toLocaleDateString('ar-SA')}
                 </span>
               </div>
+              {analysis.isSimulated ? (
+                <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/40 text-amber-300 text-[11px] font-bold leading-5">
+                  ⚠️ بيانات محاكاة تجريبية من محرك استدلالي محلي (بدون تحليل Gemini حي) — الأرقام التالية للعرض والتعلم فقط ولا تُستخدم كسجلات محاسبية أو إقرارات ضريبية رسمية. فعّل GEMINI_API_KEY للتحليل الحي.
+                </div>
+              ) : (
+                <div className="p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/40 text-emerald-300 text-[11px] font-bold">
+                  ✅ تحليل Gemini حي — وفق معايير المحاسبة المصرية (ق.م 14% • مصلحة الضرائب ETA).
+                </div>
+              )}
               <p className="leading-relaxed text-slate-300">{analysis.summary}</p>
             </div>
           </div>
@@ -388,21 +410,46 @@ export const FinancialTranscriptAnalyzer: React.FC<FinancialTranscriptAnalyzerPr
               </button>
             </div>
 
-            {/* Export Buttons */}
-            <div className="flex items-center gap-2">
+            {/* Export Buttons — real Office files + PDF/CSV */}
+            <div className="flex items-center gap-2 flex-wrap">
               <button
                 type="button"
-                onClick={() =>
-                  LocalDB.downloadFinancialAnalysisAsCsv(
-                    analysis,
-                    selectedSession?.title || 'تقرير التحليل المالي'
-                  )
-                }
+                onClick={() => exportAnalysisToXlsx(analysis, selectedSession?.title || 'تقرير التحليل المالي')}
+                className="px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-semibold border border-emerald-600 flex items-center gap-1.5 transition-all"
+                title="تصدير ملف Excel حقيقي متعدد الأوراق (.xlsx)"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5" />
+                <span>Excel XLSX</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void exportAnalysisToDocx(analysis, selectedSession?.title || 'تقرير التحليل المالي')}
+                className="px-3 py-1.5 rounded-xl bg-blue-700 hover:bg-blue-600 text-white text-xs font-semibold border border-blue-600 flex items-center gap-1.5 transition-all"
+                title="تصدير مستند Word حقيقي (.docx)"
+              >
+                <FileCode className="w-3.5 h-3.5" />
+                <span>Word DOCX</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const ok = exportAnalysisToPdfViaPrint(analysis, selectedSession?.title || 'تقرير التحليل المالي', CURRENCIES[currency].symbol);
+                  if (!ok) setErrorMessage('حظر المتصفح نافذة الطباعة. اسمح بالنوافذ المنبثقة لحفظ ملف PDF.');
+                }}
+                className="px-3 py-1.5 rounded-xl bg-rose-700 hover:bg-rose-600 text-white text-xs font-semibold border border-rose-600 flex items-center gap-1.5 transition-all"
+                title="تصدير PDF قابل للتنزيل (حفظ كـ PDF من نافذة الطباعة)"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>PDF</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => exportAnalysisToCsv(analysis, selectedSession?.title || 'تقرير التحليل المالي', CURRENCIES[currency].symbol)}
                 className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 flex items-center gap-1.5 transition-all"
-                title="تصدير كملف CSV لجداول إكسل"
+                title="تصدير CSV متوافق مع إكسل وبرامج المحاسبة"
               >
                 <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
-                <span>تصدير CSV</span>
+                <span>CSV</span>
               </button>
               <button
                 type="button"

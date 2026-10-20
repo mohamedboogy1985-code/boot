@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      # Plain install MUST work without --legacy-peer-deps (regression guard
+      # for the esbuild/vite-8 ERESOLVE and the missing react-is peer).
+      - name: Install dependencies
+        run: npm install
+
+      - name: Type check
+        run: npm run lint
+
+      - name: Production build
+        run: npm run build
+
+      - name: Production server smoke test
+        run: |
+          (npm start > /tmp/server.log 2>&1 &)
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/api/status | grep -q '"status":"ok"'; then
+              echo "Server responded OK"
+              break
+            fi
+            sleep 1
+          done
+          curl -sf http://localhost:3000/api/status | grep -q '"shellExecution":false'
+          curl -sf -X POST http://localhost:3000/api/adapters/execute \
+            -H 'Content-Type: application/json' \
+            -d '{"action":{"adapter":"mouse","action":"move","params":{"x":1,"y":1}},"approvedByUser":false}' \
+            && echo "ERROR: unapproved adapter action was not blocked" && exit 1 || echo "Unapproved adapter action correctly blocked"
+          pkill -f "tsx server.ts" || true

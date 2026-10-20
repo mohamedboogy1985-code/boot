@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Briefcase, 
   TrendingUp, 
@@ -16,7 +16,11 @@ import {
   Filter,
   CheckCircle2,
   Clock,
-  Volume2
+  Volume2,
+  PiggyBank,
+  BellRing,
+  FileDown,
+  Coins
 } from 'lucide-react';
 import { 
   ChatterBot, 
@@ -24,12 +28,21 @@ import {
   AccountingInvoice, 
   SoundAlertSettings,
   ConversationSession,
-  TranscriptFinancialAnalysis
+  TranscriptFinancialAnalysis,
+  CurrencyCode
 } from '../types';
 import { LiveVoiceChat } from './LiveVoiceChat';
 import { FinancialTranscriptAnalyzer } from './FinancialTranscriptAnalyzer';
 import { FinancialDistributionCharts } from './FinancialDistributionCharts';
 import { LocalDB } from '../services/localDb';
+import { CURRENCIES, formatMoney, loadStoredCurrency, storeCurrency } from '../services/currency';
+import { NotificationService, playBudgetAlertSound } from '../services/notificationService';
+import {
+  exportAnalysisToXlsx,
+  exportAnalysisToDocx,
+  exportAnalysisToCsv,
+  exportAnalysisToPdfViaPrint,
+} from '../services/fileExportService';
 
 interface AccountingSuiteViewProps {
   activeBot: ChatterBot;
@@ -50,7 +63,7 @@ const SAMPLE_INVOICES: AccountingInvoice[] = [
     date: '2026-10-10',
     dueDate: '2026-10-25',
     status: 'pending',
-    vatAmount: 5175,
+    vatAmount: 4830,
     category: 'مبيعات خدمات رقمية',
   },
   {
@@ -61,7 +74,7 @@ const SAMPLE_INVOICES: AccountingInvoice[] = [
     date: '2026-10-08',
     dueDate: '2026-10-15',
     status: 'paid',
-    vatAmount: 2730,
+    vatAmount: 2548,
     category: 'استشارات محاسبية وإدارية',
   },
   {
@@ -72,7 +85,7 @@ const SAMPLE_INVOICES: AccountingInvoice[] = [
     date: '2026-09-28',
     dueDate: '2026-10-05',
     status: 'overdue',
-    vatAmount: 8700,
+    vatAmount: 8120,
     category: 'عقود صيانة سنوية',
   },
   {
@@ -83,7 +96,7 @@ const SAMPLE_INVOICES: AccountingInvoice[] = [
     date: '2026-10-01',
     dueDate: '2026-10-20',
     status: 'paid',
-    vatAmount: 1410,
+    vatAmount: 1316,
     category: 'تراخيص برمجيات الحسابات',
   },
   {
@@ -94,7 +107,7 @@ const SAMPLE_INVOICES: AccountingInvoice[] = [
     date: '2026-09-22',
     dueDate: '2026-10-12',
     status: 'pending',
-    vatAmount: 3390,
+    vatAmount: 3164,
     category: 'تطوير حلول الفوترة',
   },
 ];
@@ -115,6 +128,80 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
   // Sessions and financial analysis state
   const [sessions, setSessions] = useState<ConversationSession[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
+
+  // Multi-currency state (EGP default — Egyptian accounting profile)
+  const [currency, setCurrency] = useState<CurrencyCode>(() => loadStoredCurrency());
+  const symbol = CURRENCIES[currency].symbol;
+  const vatRate = CURRENCIES[currency].vatRate;
+  const handleCurrencyChange = (code: CurrencyCode) => {
+    setCurrency(code);
+    storeCurrency(code);
+  };
+
+  // Budget Threshold state (user-defined monthly expense limit, persisted)
+  const [budgetLimit, setBudgetLimit] = useState<number>(() => {
+    try {
+      return Number(localStorage.getItem('chatterbots_monthly_budget_limit')) || 50000;
+    } catch {
+      return 50000;
+    }
+  });
+  const [pdfExportError, setPdfExportError] = useState<string | null>(null);
+  const budgetAlertKeyRef = useRef<string>('');
+
+  const selectedSession = sessions.find((s) => s.id === selectedSessionId);
+  const selectedAnalysis = selectedSession?.financialAnalysis;
+
+  // Cumulative expenses of the CURRENT month across all analyzed sessions.
+  const currentMonthKey = new Date().toISOString().slice(0, 7); // YYYY-MM
+  const currentMonthExpenses = useMemo(() => {
+    let sum = 0;
+    for (const s of sessions) {
+      const fa = s.financialAnalysis;
+      if (!fa) continue;
+      const datedExpenses = (fa.transactions || []).filter(
+        (t) => t.type === 'expense' && t.date?.startsWith(currentMonthKey),
+      );
+      if (datedExpenses.length > 0) {
+        sum += datedExpenses.reduce((acc, t) => acc + Number(t.amount || 0), 0);
+      } else if (new Date(fa.analyzedAt).toISOString().slice(0, 7) === currentMonthKey) {
+        sum += Number(fa.totalExpenses || 0);
+      }
+    }
+    return sum;
+  }, [sessions, currentMonthKey]);
+
+  const isOverBudget = budgetLimit > 0 && currentMonthExpenses >= budgetLimit;
+  const budgetPercent = budgetLimit > 0 ? Math.min(100, Math.round((currentMonthExpenses / budgetLimit) * 100)) : 0;
+
+  // Fire sound + browser notification ONCE per (month, limit) when crossing the threshold.
+  useEffect(() => {
+    const key = `${currentMonthKey}-${budgetLimit}`;
+    if (!isOverBudget) {
+      if (budgetAlertKeyRef.current && !budgetAlertKeyRef.current.startsWith(currentMonthKey)) {
+        budgetAlertKeyRef.current = '';
+      }
+      return;
+    }
+    if (budgetAlertKeyRef.current === key) return;
+    budgetAlertKeyRef.current = key;
+    playBudgetAlertSound();
+    NotificationService.notifyBudgetExceeded(
+      formatMoney(currentMonthExpenses, currency),
+      formatMoney(budgetLimit, currency),
+    );
+  }, [isOverBudget, currentMonthExpenses, budgetLimit, currentMonthKey, currency]);
+
+  const handleBudgetLimitChange = (value: number) => {
+    const safe = isNaN(value) || value < 0 ? 0 : value;
+    setBudgetLimit(safe);
+    budgetAlertKeyRef.current = '';
+    try {
+      localStorage.setItem('chatterbots_monthly_budget_limit', String(safe));
+    } catch {
+      /* storage unavailable */
+    }
+  };
 
   const loadSessions = async () => {
     try {
@@ -174,6 +261,27 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
           </p>
         </div>
 
+        <div className="flex flex-col gap-2 self-start md:self-auto md:items-end">
+          {/* Multi-currency selector: Egyptian Pound (default), USD, SAR */}
+          <label className="flex items-center gap-2 bg-slate-950/80 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-200 shadow">
+            <Coins className="w-4 h-4 text-amber-400" />
+            <span className="font-bold text-slate-300">عملة العرض والتحليل:</span>
+            <select
+              value={currency}
+              onChange={(e) => handleCurrencyChange(e.target.value as CurrencyCode)}
+              className="bg-transparent font-bold text-white focus:outline-none cursor-pointer"
+              aria-label="اختيار عملة البرنامج"
+            >
+              <option value="EGP" className="bg-slate-900">الجنيه المصري (EGP)</option>
+              <option value="USD" className="bg-slate-900">الدولار الأمريكي (USD)</option>
+              <option value="SAR" className="bg-slate-900">الريال السعودي (SAR)</option>
+            </select>
+          </label>
+          <span className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+            🇪🇬 معايير المحاسبة المصرية • {CURRENCIES[currency].vatLabel} • {CURRENCIES[currency].authorityAr}
+          </span>
+        </div>
+
         <button
           onClick={onOpenStudio}
           className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold border border-slate-700 transition-all flex items-center gap-2 self-start md:self-auto shadow-md"
@@ -194,7 +302,7 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
             </span>
           </div>
           <div className="text-xl font-extrabold text-white font-mono">
-            428,500 <span className="text-xs text-slate-400 font-normal">ر.س</span>
+            428,500 <span className="text-xs text-slate-400 font-normal">{symbol}</span>
           </div>
           <p className="text-[11px] text-emerald-400 mt-1 flex items-center gap-1 font-semibold">
             <span>+14.2%</span>
@@ -211,7 +319,7 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
             </span>
           </div>
           <div className="text-xl font-extrabold text-white font-mono">
-            182,100 <span className="text-xs text-slate-400 font-normal">ر.س</span>
+            182,100 <span className="text-xs text-slate-400 font-normal">{symbol}</span>
           </div>
           <p className="text-[11px] text-amber-400 mt-1 flex items-center gap-1 font-semibold">
             <span>-4.8%</span>
@@ -228,7 +336,7 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
             </span>
           </div>
           <div className="text-xl font-extrabold text-white font-mono">
-            246,400 <span className="text-xs text-slate-400 font-normal">ر.س</span>
+            246,400 <span className="text-xs text-slate-400 font-normal">{symbol}</span>
           </div>
           <p className="text-[11px] text-indigo-400 mt-1 flex items-center gap-1 font-semibold">
             <span>هامش الربح: 57.5%</span>
@@ -244,7 +352,7 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
             </span>
           </div>
           <div className="text-xl font-extrabold text-white font-mono">
-            54,200 <span className="text-xs text-slate-400 font-normal">ر.س</span>
+            54,200 <span className="text-xs text-slate-400 font-normal">{symbol}</span>
           </div>
           <p className="text-[11px] text-rose-400 mt-1 flex items-center gap-1 font-semibold">
             <span>2 فواتير متأخرة</span>
@@ -344,7 +452,7 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
 
                     <div className="flex items-center gap-2">
                       <span className="font-mono font-bold text-sm text-white">
-                        {inv.amount.toLocaleString('ar-SA')} ر.س
+                        {formatMoney(inv.amount, currency)}
                       </span>
                       {inv.status === 'paid' && (
                         <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
@@ -391,7 +499,7 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
                 <span className="text-slate-400">تاريخ الاستحقاق: {selectedInvoice.dueDate}</span>
               </div>
               <p className="text-slate-300 mb-2">
-                العميل: <strong>{selectedInvoice.client}</strong> بمبلغ إجمالي <strong>{selectedInvoice.amount.toLocaleString('ar-SA')} ر.س</strong> شامل ضريبة القيمة المضافة.
+                العميل: <strong>{selectedInvoice.client}</strong> بمبلغ إجمالي <strong>{formatMoney(selectedInvoice.amount, currency)}</strong> شامل ضريبة القيمة المضافة وفق المعايير المصرية (14%)، ويُصدَر عبر منظومة الفاتورة الإلكترونية (ETA).
               </p>
               <div className="text-[11px] text-slate-400">
                 💡 اسأل الوكيل الصوتي في اليسار: "ما الإجراء المناسب لهذه الفاتورة؟" أو "اقترح رسالة تذكير مهذبة للعميل".
@@ -425,6 +533,126 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
         activeBot={activeBot}
       />
 
+      {/* Gemini analysis export (PDF / CSV / Excel / Word) + Budget Threshold */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Export card */}
+        <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 shadow-xl space-y-3">
+          <h3 className="text-base font-bold text-white flex items-center gap-2">
+            <FileDown className="w-4 h-4 text-emerald-400" />
+            <span>تصدير بيانات تحليل Gemini للجلسة المحددة</span>
+          </h3>
+          <p className="text-[11px] leading-5 text-slate-400">
+            ملفات حقيقية قابلة للتنزيل: Excel متعدد الأوراق، مستند Word، تقرير PDF (حفظ كـ PDF من الطباعة)، وCSV لبرامج المحاسبة — بعملة {CURRENCIES[currency].labelAr}.
+            {selectedAnalysis?.isSimulated && ' ملحوظة: تحليل هذه الجلسة صادر عن محاكاة محلية وسيُوسم بوضوح داخل الملفات.'}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={!selectedAnalysis}
+              onClick={() => selectedAnalysis && exportAnalysisToCsv(selectedAnalysis, selectedSession?.title || 'تقرير التحليل المالي', symbol)}
+              className="px-4 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 text-white text-xs font-bold"
+            >
+              تنزيل CSV
+            </button>
+            <button
+              type="button"
+              disabled={!selectedAnalysis}
+              onClick={() => {
+                if (!selectedAnalysis) return;
+                const ok = exportAnalysisToPdfViaPrint(selectedAnalysis, selectedSession?.title || 'تقرير التحليل المالي', symbol);
+                setPdfExportError(ok ? null : 'حظر المتصفح نافذة الطباعة — اسمح بالنوافذ المنبثقة ثم أعد محاولة تصدير PDF.');
+              }}
+              className="px-4 py-2 rounded-xl bg-rose-700 hover:bg-rose-600 disabled:opacity-40 text-white text-xs font-bold"
+            >
+              تنزيل PDF
+            </button>
+            <button
+              type="button"
+              disabled={!selectedAnalysis}
+              onClick={() => selectedAnalysis && exportAnalysisToXlsx(selectedAnalysis, selectedSession?.title || 'تقرير التحليل المالي')}
+              className="px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-600 disabled:opacity-40 text-white text-xs font-bold"
+            >
+              Excel XLSX
+            </button>
+            <button
+              type="button"
+              disabled={!selectedAnalysis}
+              onClick={() => void (selectedAnalysis && exportAnalysisToDocx(selectedAnalysis, selectedSession?.title || 'تقرير التحليل المالي'))}
+              className="px-4 py-2 rounded-xl bg-blue-700 hover:bg-blue-600 disabled:opacity-40 text-white text-xs font-bold"
+            >
+              Word DOCX
+            </button>
+          </div>
+          {!selectedAnalysis && (
+            <p className="text-[11px] text-amber-300">لا يوجد تحليل محفوظ للجلسة المحددة بعد — شغّل التحليل من بطاقة «تحليل نصوص المحادثات» أسفله أولًا، ثم صدّر من هنا.</p>
+          )}
+          {pdfExportError && <p className="text-[11px] text-rose-300">{pdfExportError}</p>}
+        </div>
+
+        {/* Budget Threshold card */}
+        <div className={`bg-slate-900/90 border rounded-3xl p-5 shadow-xl space-y-3 ${isOverBudget ? 'border-rose-500/60' : 'border-slate-800'}`}>
+          <h3 className="text-base font-bold text-white flex items-center gap-2">
+            <PiggyBank className="w-4 h-4 text-amber-400" />
+            <span>حدّ الميزانية الشهري (Budget Threshold)</span>
+          </h3>
+          <div className="flex flex-wrap items-end gap-3 text-xs">
+            <label className="space-y-1">
+              <span className="text-slate-400 block">الحد الشهري للمصروفات ({symbol})</span>
+              <input
+                type="number"
+                min={0}
+                step={500}
+                value={budgetLimit}
+                onChange={(e) => handleBudgetLimitChange(Number(e.target.value))}
+                className="bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white w-44 focus:outline-none focus:border-amber-500"
+                aria-label="حد الميزانية الشهري"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={async () => {
+                await NotificationService.requestPermission(true);
+                playBudgetAlertSound();
+                await NotificationService.notify('اختبار تنبيه الميزانية 🔔', {
+                  body: 'إشعارات المتصفح والصوت تعملان — ستصلك مثلها تلقائيًا عند تجاوز حد الميزانية.',
+                  kind: 'budget',
+                  tag: 'budget-test',
+                });
+              }}
+              className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-xs font-bold flex items-center gap-1.5"
+            >
+              <BellRing className="w-3.5 h-3.5" /> تفعيل الإشعارات + اختبار التنبيه
+            </button>
+          </div>
+          <div>
+            <div className="flex items-center justify-between text-[11px] text-slate-400">
+              <span>
+                مصروفات الشهر الحالي ({currentMonthKey}): <b className="text-white">{formatMoney(currentMonthExpenses, currency)}</b>
+              </span>
+              <span>
+                الحد: <b className="text-white">{formatMoney(budgetLimit, currency)}</b> • {budgetPercent}%
+              </span>
+            </div>
+            <div className="h-3 rounded-full bg-slate-800 overflow-hidden mt-1.5">
+              <div
+                className={`h-full transition-all ${isOverBudget ? 'bg-gradient-to-r from-rose-600 to-red-500' : budgetPercent >= 80 ? 'bg-gradient-to-r from-amber-500 to-orange-500' : 'bg-gradient-to-r from-emerald-500 to-teal-500'}`}
+                style={{ width: `${budgetPercent}%` }}
+              />
+            </div>
+          </div>
+          {isOverBudget ? (
+            <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/50 text-rose-200 text-[11px] font-bold flex items-center gap-2">
+              <BellRing className="w-4 h-4 shrink-0" />
+              <span>تم تجاوز حد الميزانية الشهري! أُرسل تنبيه صوتي وإشعار متصفح الآن. راجِع مخططات توزيع المصاريف أعلاه لخفض أكبر البنود.</span>
+            </div>
+          ) : (
+            <p className="text-[11px] text-slate-400">
+              يُحتسب الإجمالي من المصروفات المستخرجة بتقنية التحليل من جلساتك لهذا الشهر. عند التجاوز يصلك تنبيه صوتي وإشعار مرئي حتى لو كان التبويب في الخلفية.
+            </p>
+          )}
+        </div>
+      </div>
+
       {/* Financial Transcript Insights & AI Tax Deductions Analyzer */}
       <FinancialTranscriptAnalyzer 
         userProfile={userProfile} 
@@ -433,6 +661,7 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
         selectedSessionId={selectedSessionId}
         onSelectSessionId={setSelectedSessionId}
         onAnalysisComplete={handleAnalysisComplete}
+        currency={currency}
       />
 
     </div>
