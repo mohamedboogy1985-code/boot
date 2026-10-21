@@ -28,11 +28,20 @@ import {
   Sliders,
   Upload,
   FileUp,
+  FileText,
+  ExternalLink,
   Image as ImageIcon
 } from 'lucide-react';
 import { ChatterBot, UserProfile, ChatMessage, ConversationSession, SoundAlertSettings } from '../types';
 import { audioManager } from '../services/audio';
-import { videoManager } from '../services/videoManager';
+import {
+  videoManager,
+  classifyCameraError,
+  getCameraSupportInfo,
+  prepareImageForUpload,
+  readFileAsDataUrl,
+} from '../services/videoManager';
+import type { CameraIssue, CameraSupportInfo } from '../services/videoManager';
 import { ApiService } from '../services/api';
 import { LocalDB } from '../services/localDb';
 import { soundEffectsManager, PRESET_CHIMES } from '../services/soundEffects';
@@ -75,8 +84,10 @@ export const LiveVoiceChat: React.FC<LiveVoiceChatProps> = ({
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isCameraLoading, setIsCameraLoading] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
-  const [cameraError, setCameraError] = useState<string | null>(null);
-  const [uploadedImagePreview, setUploadedImagePreview] = useState<string | null>(null);
+  const [cameraIssue, setCameraIssue] = useState<CameraIssue | null>(null);
+  const [cameraSupport, setCameraSupport] = useState<CameraSupportInfo | null>(null);
+  const [uploadedDoc, setUploadedDoc] = useState<{ dataUrl: string; mimeType: string; name: string } | null>(null);
+  const [isDragOverDoc, setIsDragOverDoc] = useState(false);
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'info' | 'error' | 'success' } | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -87,6 +98,19 @@ export const LiveVoiceChat: React.FC<LiveVoiceChatProps> = ({
       setToastMessage((prev) => (prev?.text === text ? null : prev));
     }, 4500);
   };
+
+  // Probe camera support once (secure context, permissions-policy, permission state)
+  useEffect(() => {
+    let alive = true;
+    getCameraSupportInfo()
+      .then((info) => {
+        if (alive) setCameraSupport(info);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // Stop camera on unmount
   useEffect(() => {
@@ -211,30 +235,39 @@ export const LiveVoiceChat: React.FC<LiveVoiceChatProps> = ({
     };
   }, [voiceState]);
 
-  // Camera toggle handler
-  // Camera toggle handler
+  // Camera toggle handler — with precise failure diagnosis (never a generic message)
   const handleToggleCamera = async () => {
     if (isCameraActive) {
       videoManager.stopCamera(videoRef.current);
       setIsCameraActive(false);
-      setCameraError(null);
+      setCameraIssue(null);
     } else {
       setIsCameraLoading(true);
-      setCameraError(null);
+      setCameraIssue(null);
       try {
+        const info = await getCameraSupportInfo().catch(() => null);
+        if (info) setCameraSupport(info);
         await videoManager.startCamera(videoRef.current);
         setIsCameraActive(true);
-        setCameraError(null);
+        setCameraIssue(null);
         showToast('تم تشغيل الكاميرا بنجاح! يمكنك الآن التحدث وعرض المستندات مباشرة.', 'success');
       } catch (err: any) {
-        console.warn('Camera access denied or unavailable:', err?.name || err?.message);
-        const errMsg = 'تم حظر أو رفض إذن الكاميرا من المتصفح أو إعدادات الإطار. يمكنك السماح بالإذن أو رفع صورة الفاتورة/المستند مباشرة كبديل فوري.';
-        setCameraError(errMsg);
+        console.warn('Camera access failed:', err?.name || err?.message);
+        const issue = classifyCameraError(err);
+        setCameraIssue(issue);
         setIsCameraActive(false);
-        showToast(errMsg, 'error');
+        showToast(`${issue.title} — يمكنك رفع صورة أو PDF الفاتورة مباشرة كبديل فوري.`, 'error');
       } finally {
         setIsCameraLoading(false);
       }
+    }
+  };
+
+  // Open the same app as a standalone top-level page (escapes iframe camera policy)
+  const handleOpenStandalone = () => {
+    const win = window.open(window.location.href, '_blank', 'noopener');
+    if (!win) {
+      showToast('حظر المتصفح النافذة المنبثقة — انسخ رابط الصفحة وافتحه يدويًا في تبويب جديد من المتصفح، ثم شغّل الكاميرا.', 'info');
     }
   };
 
@@ -249,43 +282,88 @@ export const LiveVoiceChat: React.FC<LiveVoiceChatProps> = ({
     }
   };
 
-  // Handle uploaded file image
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const base64 = reader.result as string;
-      setUploadedImagePreview(base64);
-      showToast('تم تحميل صورة المستند بنجاح! جاري تحليله صوتياً مع الوكيل...', 'success');
-      handleUserSpeechFinal(
-        'لقد قمت برفع هذه الصورة للمستند/الفاتورة. يرجى فحصها وتدقيق بنودها وأرقامها محاسبياً والرد علي صوتياً.',
-        base64
+  // Process an uploaded invoice: image (downscaled) or PDF, then voice-analyze it
+  const processDocumentFile = async (file: File) => {
+    const isImage = file.type.startsWith('image/');
+    const isPdf = file.type === 'application/pdf';
+    if (!isImage && !isPdf) {
+      showToast('نوع ملف غير مدعوم — ارفع صورة (JPG/PNG/WebP) أو ملف PDF للفاتورة.', 'error');
+      return;
+    }
+    const MAX_BYTES = 10 * 1024 * 1024;
+    if (file.size > MAX_BYTES) {
+      showToast('الملف أكبر من 10MB — التقط صورة أصغر أو ضغط ملف PDF ثم أعد الرفع.', 'error');
+      return;
+    }
+    try {
+      const prepared = isImage
+        ? await prepareImageForUpload(file)
+        : { dataUrl: await readFileAsDataUrl(file), mimeType: 'application/pdf' };
+      setUploadedDoc({ dataUrl: prepared.dataUrl, mimeType: prepared.mimeType, name: file.name });
+      showToast('تم تحميل المستند بنجاح! جاري تحليله صوتياً مع الوكيل...', 'success');
+      await handleUserSpeechFinal(
+        'لقد قمت برفع ملف هذا المستند/الفاتورة. يرجى فحصه وتدقيق بنوده وأرقامه وضريبة القيمة المضافة محاسبياً والرد علي صوتياً.',
+        prepared.dataUrl,
+        prepared.mimeType
       );
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
+    } catch (err) {
+      console.warn('Document upload failed:', err);
+      showToast('تعذّرت قراءة هذا الملف — جرّب صورة أوضح أو ملف PDF أصغر.', 'error');
+    }
   };
 
-  // Handle sample invoice testing when no camera is present
+  // Handle uploaded file (input change)
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (file) void processDocumentFile(file);
+  };
+
+  // Handle sample invoice testing when no camera is present.
+  // The sample is an SVG; Gemini vision doesn't accept SVG, so rasterize to PNG first.
   const handleSampleInvoiceTest = (title: string, sampleDataUrl: string) => {
-    setUploadedImagePreview(sampleDataUrl);
-    showToast(`تم تحميل عينة "${title}" بنجاح! جاري التحليل الصوتي...`, 'success');
-    handleUserSpeechFinal(
-      `أعرض لك عينة "${title}"، تفضل بمراجعتها وتدقيق أرقامها وضريبتها والرد علي صوتياً.`,
-      sampleDataUrl
-    );
+    const svgText = sampleDataUrl.slice(sampleDataUrl.indexOf(',') + 1);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 600;
+        canvas.height = 360;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('no ctx');
+        ctx.drawImage(img, 0, 0, 600, 360);
+        const png = canvas.toDataURL('image/png');
+        setUploadedDoc({ dataUrl: png, mimeType: 'image/png', name: title });
+        showToast(`تم تحميل عينة "${title}" بنجاح! جاري التحليل الصوتي...`, 'success');
+        void handleUserSpeechFinal(
+          `أعرض لك عينة "${title}"، تفضل بمراجعتها وتدقيق أرقامها وضريبتها والرد علي صوتياً.`,
+          png,
+          'image/png'
+        );
+      } catch {
+        setUploadedDoc({ dataUrl: sampleDataUrl, mimeType: 'image/svg+xml', name: title });
+        void handleUserSpeechFinal(
+          `أعرض لك عينة "${title}"، تفضل بمراجعتها وتدقيق أرقامها وضريبتها والرد علي صوتياً.`
+        );
+      }
+    };
+    img.onerror = () => {
+      setUploadedDoc({ dataUrl: sampleDataUrl, mimeType: 'image/svg+xml', name: title });
+      showToast('تعذر تجهيز العينة كصورة للرؤية — سيرد الوكيل دون فحص الصورة.', 'info');
+      void handleUserSpeechFinal(`أعرض لك عينة "${title}"، تفضل بمراجعتها وتدقيق أرقامها وضريبتها والرد علي صوتياً.`);
+    };
+    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgText)}`;
   };
 
   // Snap frame and immediately analyze with Agent using Voice
   const handleCaptureAndAnalyze = async () => {
-    // If user has an uploaded image preview, analyze that
-    if (uploadedImagePreview) {
+    // If user has an uploaded document, analyze that
+    if (uploadedDoc) {
       setIsScanning(true);
       await handleUserSpeechFinal(
         'يرجى إعادة تدقيق المستند المرفوع وتحليل أرقامه محاسبياً صوتياً.',
-        uploadedImagePreview
+        uploadedDoc.dataUrl,
+        uploadedDoc.mimeType
       );
       setIsScanning(false);
       return;
@@ -309,16 +387,18 @@ export const LiveVoiceChat: React.FC<LiveVoiceChatProps> = ({
     setIsScanning(false);
   };
 
-  // Handle user speech submission (with optional camera frame for vision)
-  const handleUserSpeechFinal = async (text: string, overrideImage?: string) => {
+  // Handle user speech submission (with optional camera frame / uploaded doc for vision)
+  const handleUserSpeechFinal = async (text: string, overrideImage?: string, overrideMimeType?: string) => {
     if (!text.trim()) return;
 
     // Grab current camera frame if camera is running and no override
     let imageFrame = overrideImage;
+    let imageMimeType = overrideMimeType || 'image/jpeg';
     if (!imageFrame && isCameraActive && videoRef.current) {
       const captured = videoManager.captureFrame(videoRef.current);
       if (captured) {
         imageFrame = captured;
+        imageMimeType = 'image/jpeg';
       }
     }
 
@@ -340,7 +420,8 @@ export const LiveVoiceChat: React.FC<LiveVoiceChatProps> = ({
         userProfile,
         messages,
         userMsg.text,
-        imageFrame || undefined
+        imageFrame || undefined,
+        imageFrame ? imageMimeType : undefined
       );
 
       const botMsg: ChatMessage = {
@@ -794,7 +875,22 @@ export const LiveVoiceChat: React.FC<LiveVoiceChatProps> = ({
             </div>
 
             {/* 2. User Live Camera Screen */}
-            <div className="relative w-full h-72 sm:h-80 rounded-3xl overflow-hidden bg-slate-950 border border-slate-800 shadow-2xl flex flex-col justify-between p-4">
+            <div
+              className={`relative w-full h-72 sm:h-80 rounded-3xl overflow-hidden bg-slate-950 border shadow-2xl flex flex-col justify-between p-4 transition-colors ${
+                isDragOverDoc ? 'border-indigo-400 ring-2 ring-indigo-500/50' : 'border-slate-800'
+              }`}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDragOverDoc(true);
+              }}
+              onDragLeave={() => setIsDragOverDoc(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsDragOverDoc(false);
+                const file = e.dataTransfer.files?.[0];
+                if (file) void processDocumentFile(file);
+              }}
+            >
               
               {/* Camera Video Stream */}
               <video
@@ -856,37 +952,49 @@ export const LiveVoiceChat: React.FC<LiveVoiceChatProps> = ({
                 )}
               </div>
 
-              {/* Hidden file input for uploading invoice images */}
+              {/* Hidden file input for uploading invoice images / PDFs */}
               <input
                 type="file"
                 ref={fileInputRef}
                 onChange={handleFileUpload}
-                accept="image/*"
+                accept="image/*,application/pdf"
                 className="hidden"
               />
 
               {/* Uploaded Document Preview Mode */}
-              {uploadedImagePreview && !isCameraActive && (
+              {uploadedDoc && !isCameraActive && (
                 <div className="relative w-full h-full my-auto flex flex-col items-center justify-between p-3 z-10 bg-slate-900/90 rounded-2xl border border-indigo-500/40">
-                  <div className="flex items-center justify-between w-full">
-                    <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-[11px] font-bold">
-                      <ImageIcon className="w-3.5 h-3.5" />
-                      <span>مستند/فاتورة جاهزة للفحص</span>
+                  <div className="flex items-center justify-between w-full gap-2">
+                    <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-[11px] font-bold max-w-[70%]">
+                      {uploadedDoc.mimeType === 'application/pdf' ? (
+                        <FileText className="w-3.5 h-3.5 shrink-0" />
+                      ) : (
+                        <ImageIcon className="w-3.5 h-3.5 shrink-0" />
+                      )}
+                      <span className="truncate">{uploadedDoc.name || 'مستند/فاتورة جاهزة للفحص'}</span>
                     </span>
                     <button
-                      onClick={() => setUploadedImagePreview(null)}
-                      className="text-xs text-rose-400 hover:text-rose-300 px-2 py-0.5 rounded-lg bg-rose-950/60 border border-rose-600/40"
+                      onClick={() => setUploadedDoc(null)}
+                      className="text-xs text-rose-400 hover:text-rose-300 px-2 py-0.5 rounded-lg bg-rose-950/60 border border-rose-600/40 shrink-0"
                     >
                       إلغاء المستند
                     </button>
                   </div>
 
                   <div className="my-auto max-h-36 max-w-full overflow-hidden rounded-xl border border-slate-700 bg-black/60 p-1 flex items-center justify-center">
-                    <img
-                      src={uploadedImagePreview}
-                      alt="Uploaded Document"
-                      className="max-h-32 object-contain rounded"
-                    />
+                    {uploadedDoc.mimeType.startsWith('image/') ? (
+                      <img
+                        src={uploadedDoc.dataUrl}
+                        alt="Uploaded Document"
+                        className="max-h-32 object-contain rounded"
+                      />
+                    ) : (
+                      <div className="flex flex-col items-center gap-1.5 px-8 py-5 text-rose-300">
+                        <FileText className="w-10 h-10" />
+                        <span className="text-[11px] font-bold">ملف فاتورة PDF جاهز للتدقيق</span>
+                        <span className="text-[10px] text-slate-400 max-w-[220px] truncate">{uploadedDoc.name}</span>
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-2 w-full">
@@ -910,37 +1018,62 @@ export const LiveVoiceChat: React.FC<LiveVoiceChatProps> = ({
               )}
 
               {/* Placeholder when Camera is Off and no uploaded preview */}
-              {!isCameraActive && !uploadedImagePreview && (
-                <div className="my-auto flex flex-col items-center justify-center text-center p-3 z-10">
-                  {cameraError ? (
-                    /* Graceful Permission Denied / Unavailable fallback */
+              {!isCameraActive && !uploadedDoc && (
+                <div className="my-auto flex flex-col items-center justify-center text-center p-3 z-10 w-full max-h-full overflow-y-auto">
+                  {cameraIssue ? (
+                    /* Precise camera-failure diagnosis + instant fallbacks */
                     <div className="w-full flex flex-col items-center">
-                      <div className="w-12 h-12 rounded-2xl bg-amber-950/60 border border-amber-600/40 flex items-center justify-center text-amber-400 mb-2 shadow-inner">
+                      <div className="w-11 h-11 rounded-2xl bg-amber-950/60 border border-amber-600/40 flex items-center justify-center text-amber-400 mb-2 shadow-inner shrink-0">
                         <AlertCircle className="w-6 h-6 animate-pulse" />
                       </div>
                       <h4 className="text-xs sm:text-sm font-bold text-amber-300 mb-1">
-                        إذن الكاميرا غير مفعل في المتصفح
+                        {cameraIssue.title}
                       </h4>
-                      <p className="text-[11px] text-slate-300 max-w-xs mb-3 leading-relaxed">
-                        لم نتمكن من الوصول للكاميرا (Permission denied). يمكنك السماح بالإذن من إعدادات المتصفح، أو رفع ملف الفاتورة مباشرة للمعاينة والتحليل الصوتي:
+                      <p className="text-[11px] text-slate-300 max-w-sm mb-2 leading-relaxed">
+                        {cameraIssue.message}
                       </p>
+                      {cameraIssue.steps.length > 0 && (
+                        <ol className="text-[11px] text-slate-400 max-w-sm mb-3 leading-5 text-right list-decimal list-inside space-y-0.5 bg-slate-900/60 border border-slate-800 rounded-xl px-3 py-2 w-full">
+                          {cameraIssue.steps.map((step, i) => (
+                            <li key={i}>{step}</li>
+                          ))}
+                        </ol>
+                      )}
+                      {cameraSupport && (
+                        <p className="text-[10px] text-slate-500 mb-2">
+                          تشخيص البيئة: سياق آمن {cameraSupport.secureContext ? 'نعم' : 'لا'} • داخل إطار معاينة {cameraSupport.embedded ? 'نعم' : 'لا'} • سياسة الكاميرا {cameraSupport.policyAllows === null ? 'غير معروفة' : cameraSupport.policyAllows ? 'مسموحة' : 'محظورة'} • حالة الإذن {cameraSupport.permissionState || 'غير معروفة'}
+                        </p>
+                      )}
 
                       <div className="flex items-center justify-center gap-2 flex-wrap">
-                        <button
-                          onClick={handleToggleCamera}
-                          disabled={isCameraLoading}
-                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold border border-slate-700 transition-all active:scale-95"
-                        >
-                          <RefreshCw className="w-3.5 h-3.5" />
-                          <span>إعادة طلب الإذن</span>
-                        </button>
+                        {(cameraIssue.canRetry || cameraIssue.kind === 'denied') && (
+                          <button
+                            onClick={handleToggleCamera}
+                            disabled={isCameraLoading}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold border border-slate-700 transition-all active:scale-95"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            <span>إعادة طلب الإذن</span>
+                          </button>
+                        )}
+
+                        {cameraSupport?.embedded && (
+                          <button
+                            onClick={handleOpenStandalone}
+                            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-all shadow-md active:scale-95"
+                            title="يفتح نفس التطبيق في تبويب مستقل حيث تعمل الكاميرا طبيعيًا"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                            <span>فتح التطبيق في نافذة مستقلة</span>
+                          </button>
+                        )}
 
                         <button
                           onClick={() => fileInputRef.current?.click()}
                           className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-all shadow-md active:scale-95"
                         >
                           <Upload className="w-3.5 h-3.5" />
-                          <span>رفع صورة مستند</span>
+                          <span>رفع صورة / PDF فاتورة</span>
                         </button>
 
                         <button
@@ -965,7 +1098,7 @@ export const LiveVoiceChat: React.FC<LiveVoiceChatProps> = ({
                         كاميرا الفيديو غير مشغلة
                       </h4>
                       <p className="text-xs text-slate-400 max-w-xs mb-3">
-                        قم بتشغيل الكاميرا للتحدث وجهاً لوجه مع الوكيل وعرض الفواتير ليراها ويحللها صوتياً.
+                        قم بتشغيل الكاميرا للتحدث وجهاً لوجه مع الوكيل وعرض الفواتير ليراها ويحللها صوتياً — أو ارفع/اسحب ملف فاتورة (صورة أو PDF، حتى 10MB) وأفلته هنا مباشرة.
                       </p>
                       <div className="flex items-center justify-center gap-2 flex-wrap">
                         <button
@@ -980,10 +1113,10 @@ export const LiveVoiceChat: React.FC<LiveVoiceChatProps> = ({
                         <button
                           onClick={() => fileInputRef.current?.click()}
                           className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold border border-slate-700 transition-all active:scale-95"
-                          title="رفع صورة مستند أو فاتورة من جهازك"
+                          title="رفع صورة أو ملف PDF لفاتورة من جهازك (يمكنك أيضًا السحب والإفلات هنا)"
                         >
                           <Upload className="w-3.5 h-3.5 text-indigo-400" />
-                          <span>رفع صورة فاتورة</span>
+                          <span>رفع فاتورة صورة/PDF</span>
                         </button>
                       </div>
                     </>

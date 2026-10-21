@@ -232,7 +232,7 @@ app.get('/api/status', (req, res) => {
 // Chat endpoint with persona & user profile grounding
 app.post('/api/chat', async (req, res) => {
   try {
-    const { bot, userProfile, messageHistory, userMessage, imageBase64 } = req.body;
+    const { bot, userProfile, messageHistory, userMessage, imageBase64, imageMimeType } = req.body;
 
     const ai = getGeminiClient();
 
@@ -290,13 +290,15 @@ Guidelines:
       }
     }
 
-    // Add latest user message with optional camera frame
+    // Add latest user message with optional camera frame / uploaded document
     const userParts: any[] = [];
     if (imageBase64) {
-      const cleanData = String(imageBase64).replace(/^data:image\/\w+;base64,/, '');
+      const ALLOWED_VISION_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'application/pdf'];
+      const mimeType = ALLOWED_VISION_MIMES.includes(String(imageMimeType)) ? String(imageMimeType) : 'image/jpeg';
+      const cleanData = String(imageBase64).replace(/^data:[\w/+.-]+;base64,/, '');
       userParts.push({
         inlineData: {
-          mimeType: 'image/jpeg',
+          mimeType,
           data: cleanData,
         },
       });

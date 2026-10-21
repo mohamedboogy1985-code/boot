@@ -230,7 +230,8 @@ export const ApiService = {
     userProfile: UserProfile,
     messageHistory: ChatMessage[],
     userMessage: string,
-    imageBase64?: string
+    imageBase64?: string,
+    imageMimeType?: string
   ): Promise<string> {
     try {
       const res = await fetch('/api/chat', {
@@ -242,6 +243,7 @@ export const ApiService = {
           messageHistory,
           userMessage,
           imageBase64,
+          imageMimeType,
         }),
       });
 
