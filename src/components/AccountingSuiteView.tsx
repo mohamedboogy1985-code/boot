@@ -20,7 +20,8 @@ import {
   PiggyBank,
   BellRing,
   FileDown,
-  Coins
+  Coins,
+  RotateCcw
 } from 'lucide-react';
 import { 
   ChatterBot, 
@@ -34,6 +35,8 @@ import {
 import { LiveVoiceChat } from './LiveVoiceChat';
 import { FinancialTranscriptAnalyzer } from './FinancialTranscriptAnalyzer';
 import { FinancialDistributionCharts } from './FinancialDistributionCharts';
+import { InvoiceImportCard } from './InvoiceImportCard';
+import { MonthlyTaxReportCard } from './MonthlyTaxReportCard';
 import { LocalDB } from '../services/localDb';
 import { CURRENCIES, formatMoney, loadStoredCurrency, storeCurrency } from '../services/currency';
 import { NotificationService, playBudgetAlertSound } from '../services/notificationService';
@@ -112,6 +115,62 @@ const SAMPLE_INVOICES: AccountingInvoice[] = [
   },
 ];
 
+const SAMPLE_INVOICES_WITH_SOURCE: AccountingInvoice[] = SAMPLE_INVOICES.map((invoice) => ({
+  ...invoice,
+  currency: 'EGP',
+  source: 'sample',
+  simulated: true,
+  notes: 'بيان تجريبي توضيحي — لا يدخل في حساب التقرير الضريبي.',
+}));
+
+const INVOICES_STORAGE_KEY = 'chatterbots_invoices_v1';
+
+function loadStoredInvoices(): AccountingInvoice[] {
+  try {
+    const raw = localStorage.getItem(INVOICES_STORAGE_KEY);
+    if (!raw) return SAMPLE_INVOICES_WITH_SOURCE;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return SAMPLE_INVOICES_WITH_SOURCE;
+
+    const valid = parsed
+      .filter(
+        (invoice: any) =>
+          invoice &&
+          typeof invoice.id === 'string' &&
+          typeof invoice.invoiceNumber === 'string' &&
+          typeof invoice.client === 'string' &&
+          typeof invoice.date === 'string' &&
+          Number.isFinite(Number(invoice.amount)),
+      )
+      .map((invoice: any): AccountingInvoice => {
+        const isKnownSample = SAMPLE_INVOICES.some((sample) => sample.id === invoice.id);
+        return {
+          ...invoice,
+          amount: Number(invoice.amount) || 0,
+          vatAmount: Number(invoice.vatAmount) || 0,
+          dueDate: typeof invoice.dueDate === 'string' && invoice.dueDate ? invoice.dueDate : invoice.date,
+          status: ['paid', 'pending', 'overdue'].includes(invoice.status) ? invoice.status : 'pending',
+          category: typeof invoice.category === 'string' && invoice.category ? invoice.category : 'مبيعات/خدمات',
+          source: isKnownSample ? 'sample' : invoice.source,
+          simulated: isKnownSample ? true : Boolean(invoice.simulated),
+        };
+      });
+
+    return valid.length ? valid : SAMPLE_INVOICES_WITH_SOURCE;
+  } catch {
+    return SAMPLE_INVOICES_WITH_SOURCE;
+  }
+}
+
+function invoiceDedupeKey(invoice: AccountingInvoice): string {
+  return [
+    invoice.invoiceNumber.trim().toLowerCase(),
+    invoice.client.trim().toLowerCase(),
+    Number(invoice.amount) || 0,
+    invoice.date,
+  ].join('|');
+}
+
 export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
   activeBot,
   userProfile,
@@ -124,6 +183,16 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
   const [selectedInvoice, setSelectedInvoice] = useState<AccountingInvoice | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState('');
+  const [invoices, setInvoices] = useState<AccountingInvoice[]>(() => loadStoredInvoices());
+  const [ledgerNotice, setLedgerNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(INVOICES_STORAGE_KEY, JSON.stringify(invoices));
+    } catch {
+      /* storage unavailable */
+    }
+  }, [invoices]);
 
   // Sessions and financial analysis state
   const [sessions, setSessions] = useState<ConversationSession[]>([]);
@@ -230,13 +299,88 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
     );
   };
 
-  const filteredInvoices = SAMPLE_INVOICES.filter((inv) => {
-    const matchesFilter = filterStatus === 'all' || inv.status === filterStatus;
-    const matchesSearch =
-      inv.invoiceNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      inv.client.toLowerCase().includes(searchTerm.toLowerCase());
-    return matchesFilter && matchesSearch;
-  });
+  const invoiceTotals = useMemo(() => {
+    const totals = {
+      total: 0,
+      vat: 0,
+      paid: 0,
+      pending: 0,
+      overdue: 0,
+      overdueCount: 0,
+    };
+    for (const invoice of invoices) {
+      const amount = Number(invoice.amount) || 0;
+      totals.total += amount;
+      totals.vat += Number(invoice.vatAmount) || 0;
+      if (invoice.status === 'paid') totals.paid += amount;
+      if (invoice.status === 'pending') totals.pending += amount;
+      if (invoice.status === 'overdue') {
+        totals.overdue += amount;
+        totals.overdueCount++;
+      }
+    }
+    return totals;
+  }, [invoices]);
+
+  const importedInvoiceCount = invoices.filter((invoice) => invoice.source !== 'sample').length;
+
+  const handleAddInvoices = (incoming: AccountingInvoice[]): number => {
+    const existingIds = new Set(invoices.map((invoice) => invoice.id));
+    const existingKeys = new Set(invoices.map(invoiceDedupeKey));
+    const fresh: AccountingInvoice[] = [];
+
+    for (const invoice of incoming) {
+      const normalized: AccountingInvoice = {
+        ...invoice,
+        invoiceNumber: invoice.invoiceNumber.trim(),
+        client: invoice.client.trim(),
+        category: invoice.category.trim() || 'مبيعات/خدمات',
+        amount: Number(invoice.amount) || 0,
+        vatAmount: Number(invoice.vatAmount) || 0,
+        currency,
+      };
+      const key = invoiceDedupeKey(normalized);
+      if (existingIds.has(normalized.id) || existingKeys.has(key)) continue;
+      existingIds.add(normalized.id);
+      existingKeys.add(key);
+      fresh.push(normalized);
+    }
+
+    if (fresh.length) {
+      setInvoices((prev) => {
+        const prevIds = new Set(prev.map((invoice) => invoice.id));
+        const prevKeys = new Set(prev.map(invoiceDedupeKey));
+        const trulyFresh = fresh.filter(
+          (invoice) => !prevIds.has(invoice.id) && !prevKeys.has(invoiceDedupeKey(invoice)),
+        );
+        return [...trulyFresh, ...prev];
+      });
+    }
+
+    setLedgerNotice(
+      fresh.length
+        ? `أُضيفت ${fresh.length} فاتورة جديدة إلى السجل المحفوظ محليًا.`
+        : 'كل الفواتير المحددة موجودة بالفعل في السجل؛ لم تُضف نسخ مكررة.',
+    );
+    return fresh.length;
+  };
+
+  const handleResetInvoices = () => {
+    if (!window.confirm('سيتم استبدال سجل الفواتير الحالي بالعينات التجريبية. هل تريد المتابعة؟')) return;
+    setInvoices(SAMPLE_INVOICES_WITH_SOURCE);
+    setSelectedInvoice(null);
+    setLedgerNotice('تمت استعادة عينات الفواتير التجريبية. لا تدخل العينات في التقرير الضريبي.');
+  };
+
+  const filteredInvoices = invoices
+    .filter((inv) => {
+      const matchesFilter = filterStatus === 'all' || inv.status === filterStatus;
+      const matchesSearch =
+        inv.invoiceNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        inv.client.toLowerCase().includes(searchTerm.toLowerCase());
+      return matchesFilter && matchesSearch;
+    })
+    .sort((a, b) => b.date.localeCompare(a.date));
 
   return (
     <div className="space-y-6">
@@ -426,6 +570,37 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
             />
           </div>
 
+          {/* Persistent local ledger summary */}
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-3.5 space-y-2">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="text-[11px] leading-5 text-slate-400">
+                <p className="font-bold text-slate-200">
+                  السجل محفوظ محليًا: {invoices.length} فاتورة
+                  <span className="text-slate-500 font-normal"> ({importedInvoiceCount} مستوردة/مستخرجة)</span>
+                </p>
+                <p>
+                  الإجمالي قبل الضريبة <b className="text-white">{formatMoney(invoiceTotals.total, currency)}</b>
+                  {' • '}قيد التحصيل <b className="text-amber-300">{formatMoney(invoiceTotals.pending + invoiceTotals.overdue, currency)}</b>
+                  {' • '}ضريبة السجل <b className="text-cyan-300">{formatMoney(invoiceTotals.vat, currency)}</b>
+                  {' • '}متأخرة: <b className="text-rose-300">{invoiceTotals.overdueCount}</b>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleResetInvoices}
+                className="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-slate-200 text-[11px] font-bold flex items-center gap-1.5 hover:bg-slate-700"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                استعادة العيّنات
+              </button>
+            </div>
+            {ledgerNotice && (
+              <p className="p-2.5 rounded-xl bg-emerald-950/50 border border-emerald-500/30 text-emerald-200 text-[11px] font-bold">
+                {ledgerNotice}
+              </p>
+            )}
+          </div>
+
           {/* Invoices List */}
           <div className="space-y-2.5 overflow-x-auto">
             {filteredInvoices.map((inv) => {
@@ -448,6 +623,15 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
                       <span className="text-xs font-semibold text-white">
                         {inv.client}
                       </span>
+                      {inv.source === 'sample' ? (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-700/50 text-slate-300 border border-slate-600/50">تجريبية</span>
+                      ) : inv.simulated ? (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">محاكاة</span>
+                      ) : inv.source ? (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+                          {inv.source === 'spreadsheet' ? 'مستوردة' : 'مستخرجة'}
+                        </span>
+                      ) : null}
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -477,7 +661,7 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
 
                   <div className="flex items-center justify-between text-[11px] text-slate-400 pt-2 border-t border-slate-800/60">
                     <span>
-                      التصنيف: {inv.category} • ضريبة (15%): {inv.vatAmount.toLocaleString('ar-SA')} ر.س
+                      التصنيف: {inv.category} • الضريبة ({Math.round(vatRate * 100)}%): {formatMoney(inv.vatAmount, currency)}{inv.sourceFileName ? ` • المصدر: ${inv.sourceFileName}` : ''}
                     </span>
                     <span className="text-indigo-400 font-semibold hover:underline flex items-center gap-1">
                       <span>استشر {activeBot.name}</span>
@@ -499,7 +683,13 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
                 <span className="text-slate-400">تاريخ الاستحقاق: {selectedInvoice.dueDate}</span>
               </div>
               <p className="text-slate-300 mb-2">
-                العميل: <strong>{selectedInvoice.client}</strong> بمبلغ إجمالي <strong>{formatMoney(selectedInvoice.amount, currency)}</strong> شامل ضريبة القيمة المضافة وفق المعايير المصرية (14%)، ويُصدَر عبر منظومة الفاتورة الإلكترونية (ETA).
+                العميل: <strong>{selectedInvoice.client}</strong> بصافي مبلغ قبل الضريبة <strong>{formatMoney(selectedInvoice.amount, currency)}</strong> وضريبة <strong>{formatMoney(selectedInvoice.vatAmount, currency)}</strong> ليصبح الإجمالي المستحق <strong>{formatMoney(selectedInvoice.amount + selectedInvoice.vatAmount, currency)}</strong> وفق {CURRENCIES[currency].vatLabel} و{CURRENCIES[currency].authorityAr}.
+                {selectedInvoice.simulated && (
+                  <span className="block mt-1 text-amber-300 font-bold">هذه فاتورة تجريبية/محاكاة؛ لا تُستخدم كسجل رسمي ولا تدخل في التقرير الضريبي.</span>
+                )}
+                {selectedInvoice.notes && (
+                  <span className="block mt-1 text-slate-400">ملاحظة: {selectedInvoice.notes}</span>
+                )}
               </p>
               <div className="text-[11px] text-slate-400">
                 💡 اسأل الوكيل الصوتي في اليسار: "ما الإجراء المناسب لهذه الفاتورة؟" أو "اقترح رسالة تذكير مهذبة للعميل".
@@ -532,6 +722,11 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
         userProfile={userProfile}
         activeBot={activeBot}
       />
+
+      {/* Bulk invoice import/extraction + monthly VAT report */}
+      <InvoiceImportCard currency={currency} onAddInvoices={handleAddInvoices} />
+
+      <MonthlyTaxReportCard sessions={sessions} currency={currency} invoices={invoices} />
 
       {/* Gemini analysis export (PDF / CSV / Excel / Word) + Budget Threshold */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -569,7 +764,7 @@ export const AccountingSuiteView: React.FC<AccountingSuiteViewProps> = ({
             <button
               type="button"
               disabled={!selectedAnalysis}
-              onClick={() => selectedAnalysis && exportAnalysisToXlsx(selectedAnalysis, selectedSession?.title || 'تقرير التحليل المالي')}
+              onClick={() => void (selectedAnalysis && exportAnalysisToXlsx(selectedAnalysis, selectedSession?.title || 'تقرير التحليل المالي'))}
               className="px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-600 disabled:opacity-40 text-white text-xs font-bold"
             >
               Excel XLSX

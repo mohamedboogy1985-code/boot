@@ -209,6 +209,19 @@ export interface AccountingInvoice {
   status: 'paid' | 'pending' | 'overdue';
   vatAmount: number;
   category: string;
+  currency?: CurrencyCode | string;
+  source?: 'sample' | 'spreadsheet' | 'extracted' | 'manual';
+  confidence?: number;
+  simulated?: boolean;
+  notes?: string;
+  sourceFileName?: string;
+}
+
+export interface InvoiceExtractionResult {
+  invoice: AccountingInvoice;
+  simulated: boolean;
+  notes: string;
+  sourceFileName?: string;
 }
 
 export type ChimeToneId = 'studio' | 'modern' | 'accounting' | 'gentle' | 'retro' | 'none';
@@ -295,6 +308,9 @@ export interface AdapterStateInfo {
 export interface AdaptersStateResponse {
   shellExecutionEnabled: boolean;
   desktopAdaptersEnabled: boolean;
+  nutJsInstalled: boolean;
+  requestIsLoopback: boolean;
+  serverPlatform: string;
   loopbackOnlyForDesktopInput: boolean;
   sandboxDirName: string;
   browserConfig: { userAgentPreset: string; timeoutMs: number; userAgent: string };

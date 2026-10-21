@@ -1,13 +1,31 @@
-import React, { useState, useEffect } from 'react';
+import React, { Suspense, lazy, useState, useEffect } from 'react';
 import { Navbar } from './components/Navbar';
 import { BotSelector } from './components/BotSelector';
 import { LiveVoiceChat } from './components/LiveVoiceChat';
 import { UserProfileModal } from './components/UserProfileModal';
 import { NewBotModal } from './components/NewBotModal';
-import { RecordedSessionsModal } from './components/RecordedSessionsModal';
 import { SoundAlertsModal } from './components/SoundAlertsModal';
-import { AccountingSuiteView } from './components/AccountingSuiteView';
-import { DeepControlHub } from './components/DeepControlHub';
+
+// Route-level code splitting: the accounting ERP, deep-control hub, and
+// recorded-sessions modal are downloaded only when the user opens them.
+const AccountingSuiteView = lazy(() =>
+  import('./components/AccountingSuiteView').then((m) => ({ default: m.AccountingSuiteView })),
+);
+const DeepControlHub = lazy(() =>
+  import('./components/DeepControlHub').then((m) => ({ default: m.DeepControlHub })),
+);
+const RecordedSessionsModal = lazy(() =>
+  import('./components/RecordedSessionsModal').then((m) => ({ default: m.RecordedSessionsModal })),
+);
+
+const LazyViewFallback: React.FC = () => (
+  <div className="flex min-h-[320px] items-center justify-center rounded-3xl border border-slate-800 bg-slate-900/70 p-8">
+    <div className="text-center">
+      <div className="mx-auto mb-3 h-10 w-10 animate-spin rounded-full border-4 border-slate-700 border-t-cyan-400" />
+      <p className="text-sm font-bold text-slate-300">جارٍ تحميل الوحدة عند الطلب…</p>
+    </div>
+  </div>
+);
 import { PRESET_BOTS, INITIAL_USER_PROFILE } from './data/presetBots';
 import { ChatterBot, UserProfile, SoundAlertSettings } from './types';
 import { LocalDB } from './services/localDb';
@@ -169,23 +187,27 @@ export default function App() {
 
           </div>
         ) : currentView === 'accounting' ? (
-          /* Accounting Suite ERP Integrated View */
-          <AccountingSuiteView
+          /* Accounting Suite ERP Integrated View (lazy chunk) */
+          <Suspense fallback={<LazyViewFallback />}>
+            <AccountingSuiteView
             activeBot={selectedBot}
             userProfile={userProfile}
             soundSettings={soundSettings}
             onOpenSoundSettings={() => setIsSoundModalOpen(true)}
             onOpenStudio={() => setCurrentView('studio')}
             onSessionSaved={refreshSessionsCount}
-            onOpenLocalDb={() => setIsLocalDbOpen(true)}
-          />
+              onOpenLocalDb={() => setIsLocalDbOpen(true)}
+            />
+          </Suspense>
         ) : (
-          /* Deep Control & Real Agent Automation Hub */
-          <DeepControlHub
+          /* Deep Control & Real Agent Automation Hub (lazy chunk) */
+          <Suspense fallback={<LazyViewFallback />}>
+            <DeepControlHub
             activeBot={selectedBot}
             allBots={[...presetBots, ...customBots]}
-            userProfile={userProfile}
-          />
+              userProfile={userProfile}
+            />
+          </Suspense>
         )}
       </main>
 
@@ -203,11 +225,15 @@ export default function App() {
         onAddBot={handleAddBot}
       />
 
-      <RecordedSessionsModal
-        isOpen={isLocalDbOpen}
-        onClose={() => setIsLocalDbOpen(false)}
-        onSessionDeleted={refreshSessionsCount}
-      />
+      {isLocalDbOpen && (
+        <Suspense fallback={null}>
+          <RecordedSessionsModal
+            isOpen={isLocalDbOpen}
+            onClose={() => setIsLocalDbOpen(false)}
+            onSessionDeleted={refreshSessionsCount}
+          />
+        </Suspense>
+      )}
 
       <SoundAlertsModal
         isOpen={isSoundModalOpen}

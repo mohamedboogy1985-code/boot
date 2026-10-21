@@ -29,19 +29,5 @@ jobs:
       - name: Production build
         run: npm run build
 
-      - name: Production server smoke test
-        run: |
-          (npm start > /tmp/server.log 2>&1 &)
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:3000/api/status | grep -q '"status":"ok"'; then
-              echo "Server responded OK"
-              break
-            fi
-            sleep 1
-          done
-          curl -sf http://localhost:3000/api/status | grep -q '"shellExecution":false'
-          curl -sf -X POST http://localhost:3000/api/adapters/execute \
-            -H 'Content-Type: application/json' \
-            -d '{"action":{"adapter":"mouse","action":"move","params":{"x":1,"y":1}},"approvedByUser":false}' \
-            && echo "ERROR: unapproved adapter action was not blocked" && exit 1 || echo "Unapproved adapter action correctly blocked"
-          pkill -f "tsx server.ts" || true
+      - name: Critical-path smoke tests
+        run: npm test

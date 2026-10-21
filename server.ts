@@ -1137,6 +1137,183 @@ Instructions:
   }
 });
 
+// Structured invoice extraction from an uploaded image/PDF.
+// Real Gemini vision when configured; otherwise a clearly-labeled, editable
+// simulated draft derived only from the file name. Nothing is saved server-side.
+app.post('/api/extract-invoice', async (req, res) => {
+  try {
+    const rawData = req.body?.fileBase64 || req.body?.imageBase64 || req.body?.dataUrl;
+    const mimeType = String(req.body?.mimeType || req.body?.imageMimeType || '');
+    const sourceFileName = String(req.body?.fileName || 'invoice')
+      .replace(/\\/g, '/')
+      .split('/')
+      .pop()
+      ?.slice(0, 160) || 'invoice';
+    const currencyCode = ['EGP', 'USD', 'SAR'].includes(req.body?.currency) ? req.body.currency : 'EGP';
+    const vatRate = currencyCode === 'SAR' ? 0.15 : 0.14;
+    const ALLOWED_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'application/pdf'];
+
+    if (!rawData || typeof rawData !== 'string') {
+      return res.status(400).json({ error: 'بيانات الملف (fileBase64) مطلوبة لاستخراج الفاتورة.' });
+    }
+    if (!ALLOWED_MIMES.includes(mimeType)) {
+      return res.status(415).json({ error: 'نوع ملف غير مدعوم. ارفع صورة JPG/PNG/WebP أو ملف PDF.' });
+    }
+
+    const cleanData = rawData.replace(/^data:[\w/+.-]+;base64,/, '').replace(/\s/g, '');
+    const estimatedBytes = Math.max(0, Math.floor((cleanData.length * 3) / 4) - 2);
+    if (!cleanData || estimatedBytes < 32) {
+      return res.status(400).json({ error: 'بيانات الملف غير صالحة أو فارغة.' });
+    }
+    if (estimatedBytes > 10 * 1024 * 1024) {
+      return res.status(413).json({ error: 'الملف أكبر من 10MB. ضغط الملف أو أرسل صفحة الفاتورة فقط.' });
+    }
+
+    // Audit only metadata — never scan or log the base64 document payload itself.
+    const guard = evaluateGuardrail('agent', 'extract_invoice', sourceFileName, `${sourceFileName} ${mimeType} ${currencyCode}`);
+    if (!guard.allowed) {
+      return res.status(403).json({ error: `تم حظر المعالجة بواسطة الحارس الأمني: ${guard.reason}`, blocked: true });
+    }
+
+    const today = new Date();
+    const todayIso = today.toISOString().slice(0, 10);
+    const dueDefault = new Date(today.getTime() + 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const normalizeDigits = (value: string) => value.replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+    const toAmount = (value: any): number => {
+      if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, value);
+      if (typeof value !== 'string') return 0;
+      const normalized = normalizeDigits(value).replace(/,/g, '').replace(/[^\d.]/g, '');
+      const parsed = Number.parseFloat(normalized);
+      return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+    };
+    const toIsoDate = (value: any, fallback: string): string => {
+      if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10);
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? fallback : parsed.toISOString().slice(0, 10);
+    };
+    const normalizeStatus = (value: any, dueDate: string): 'paid' | 'pending' | 'overdue' => {
+      const raw = String(value || '').toLowerCase();
+      if (/paid|settled|مدفوع|مسدد|خالص/.test(raw)) return 'paid';
+      if (/overdue|late|متأخر/.test(raw)) return 'overdue';
+      return dueDate < todayIso ? 'overdue' : 'pending';
+    };
+    const normalizeCurrency = (value: any): string => {
+      const raw = String(value || '');
+      if (/USD|\$|دولار/.test(raw)) return 'USD';
+      if (/SAR|ر\.س|ريال/.test(raw)) return 'SAR';
+      if (/EGP|ج\.م|جنيه/.test(raw)) return 'EGP';
+      return currencyCode;
+    };
+    const roundMoney = (value: number) => Math.round((Number(value) || 0) * 100) / 100;
+    const buildInvoice = (draft: any, simulated: boolean, notes: string) => {
+      const date = toIsoDate(draft?.date, todayIso);
+      const dueDate = toIsoDate(draft?.dueDate, dueDefault);
+      const amount = roundMoney(toAmount(draft?.amount));
+      const vatAmount = roundMoney(toAmount(draft?.vatAmount) || amount * vatRate);
+      const status = normalizeStatus(draft?.status, dueDate);
+      const confidenceRaw = Number(draft?.confidence);
+      return {
+        id: `ext-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        invoiceNumber: String(draft?.invoiceNumber || '').trim().slice(0, 60) || `EXT-${today.getFullYear()}-${String(Date.now()).slice(-5)}`,
+        client: String(draft?.client || '').trim().slice(0, 120) || 'عميل يحتاج مراجعة',
+        amount,
+        date,
+        dueDate,
+        status,
+        vatAmount,
+        category: String(draft?.category || '').trim().slice(0, 80) || 'مبيعات/خدمات',
+        currency: normalizeCurrency(draft?.currency),
+        source: 'extracted' as const,
+        confidence: Number.isFinite(confidenceRaw) ? Math.min(1, Math.max(0, confidenceRaw)) : simulated ? 0.25 : 0.7,
+        simulated,
+        notes,
+        sourceFileName,
+      };
+    };
+
+    const buildSimulatedInvoice = () => {
+      const withoutExt = sourceFileName.replace(/\.[a-z0-9]{2,5}$/i, '');
+      const seed = `${sourceFileName}|${estimatedBytes}|${mimeType}`;
+      const hash = Array.from(seed).reduce((sum, ch) => (sum * 31 + ch.charCodeAt(0)) >>> 0, 7);
+      const numbers = (normalizeDigits(withoutExt).match(/\d+(?:[.,]\d+)?/g) || [])
+        .map((n) => Number.parseFloat(n.replace(/,/g, '')))
+        .filter((n) => Number.isFinite(n) && n > 50 && n < 100_000_000);
+      const amount = numbers.length ? Math.max(...numbers) : 1_250 + (hash % 48_750);
+      const cleanClient = withoutExt
+        .replace(/invoice|inv|receipt|bill|pdf|scan|فاتورة|إيصال/gi, ' ')
+        .replace(/[_-]+/g, ' ')
+        .replace(/\d+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const invoiceNoMatch = withoutExt.match(/(?:inv|invoice)[-_ ]?([a-z0-9-]{2,})/i);
+      const notes = '[محاكاة — لم يتم تحليل محتوى الملف فعليًا] أضف GEMINI_API_KEY للاستخراج الحقيقي. راجع كل الحقول وعدّلها قبل إضافتها إلى سجل الفواتير؛ لا تستخدم هذه المسودة كسجل محاسبي رسمي.';
+      return {
+        invoice: buildInvoice({
+          invoiceNumber: invoiceNoMatch ? `INV-${invoiceNoMatch[1].toUpperCase()}` : `EXT-${today.getFullYear()}-${100 + (hash % 900)}`,
+          client: cleanClient.length >= 3 ? cleanClient : 'عميل يحتاج مراجعة',
+          amount,
+          vatAmount: amount * vatRate,
+          date: todayIso,
+          dueDate: dueDefault,
+          status: /paid|مدفوع|مسدد|خالص/i.test(sourceFileName) ? 'paid' : 'pending',
+          category: 'فاتورة مستخرجة — تحتاج تصنيفًا',
+          currency: currencyCode,
+          confidence: 0.25,
+        }, true, notes),
+        simulated: true,
+        notes,
+        sourceFileName,
+      };
+    };
+
+    const ai = getGeminiClient();
+    if (!ai) {
+      return res.json(buildSimulatedInvoice());
+    }
+
+    try {
+      const prompt = `You are an expert Arabic/English invoice extraction system for an Egyptian accounting application.
+Inspect the attached invoice image/PDF and extract ONLY information visibly present. Do not invent values.
+Return strict JSON only with this shape:
+{"invoiceNumber":"string","client":"string","amount":number,"vatAmount":number,"currency":"EGP|USD|SAR","date":"YYYY-MM-DD","dueDate":"YYYY-MM-DD","category":"string in Arabic","status":"paid|pending|overdue","confidence":0.0,"notes":"short Arabic note"}
+
+Accounting conventions for the host application:
+- amount = taxable net amount BEFORE VAT.
+- If the invoice only shows a gross total including VAT and the applicable VAT is ${currencyCode === 'SAR' ? '15%' : '14%'}, calculate amount = gross / ${currencyCode === 'SAR' ? '1.15' : '1.14'} and vatAmount = gross - amount.
+- If VAT is explicitly printed, use the printed VAT/net values.
+- If due date is absent, use date + 14 days.
+- If payment status is not visible, use pending unless due date is before ${todayIso}.
+- confidence must reflect legibility and completeness (0 to 1).`;
+      const response: any = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: [{
+          role: 'user',
+          parts: [
+            { text: prompt },
+            { inlineData: { mimeType, data: cleanData } },
+          ],
+        }],
+        config: { temperature: 0.1, responseMimeType: 'application/json' },
+      });
+      const rawJson = String(response.text || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+      const parsed = JSON.parse(rawJson);
+      const notes = String(parsed?.notes || 'تم الاستخراج بواسطة Gemini. راجع الحقول مقابل أصل الفاتورة قبل الاعتماد.').slice(0, 500);
+      const invoice = buildInvoice(parsed, false, notes);
+      if (!invoice.amount || invoice.amount <= 0) {
+        console.warn('Gemini invoice extraction returned no usable amount; using labeled simulated draft.');
+        return res.json(buildSimulatedInvoice());
+      }
+      return res.json({ invoice, simulated: false, notes, sourceFileName });
+    } catch (aiErr: any) {
+      console.warn('Gemini invoice extraction failed; using labeled simulated draft:', aiErr?.message);
+      return res.json(buildSimulatedInvoice());
+    }
+  } catch (err: any) {
+    console.error('Error in /api/extract-invoice:', err);
+    res.status(500).json({ error: err?.message || 'Invoice extraction failed' });
+  }
+});
+
 // ============================================================
 // MERGED FROM Bogy-Agants (NexusAI): Real diagnostics, multi-agent
 // orchestrator, Ollama local bridge, security audit log, and SAFE
@@ -1558,11 +1735,14 @@ async function browserFetchPage(rawUrl: string) {
 
 app.get('/api/adapters/state', (req, res) => {
   ensureSandbox();
-  const nut = DESKTOP_ADAPTERS_ENABLED ? tryLoadNutJs() : null;
+  const nut = tryLoadNutJs();
   const desktopMode = DESKTOP_ADAPTERS_ENABLED && nut ? 'enabled' : 'dry-run';
   res.json({
     shellExecutionEnabled: false,
     desktopAdaptersEnabled: DESKTOP_ADAPTERS_ENABLED,
+    nutJsInstalled: Boolean(nut),
+    requestIsLoopback: isLoopbackRequest(req),
+    serverPlatform: process.platform,
     loopbackOnlyForDesktopInput: true,
     sandboxDirName: 'adapter-workspace',
     browserConfig: { ...browserAdapterConfig, userAgent: BROWSER_UAS[browserAdapterConfig.userAgentPreset] },

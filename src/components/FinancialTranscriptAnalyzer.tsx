@@ -414,7 +414,7 @@ export const FinancialTranscriptAnalyzer: React.FC<FinancialTranscriptAnalyzerPr
             <div className="flex items-center gap-2 flex-wrap">
               <button
                 type="button"
-                onClick={() => exportAnalysisToXlsx(analysis, selectedSession?.title || 'تقرير التحليل المالي')}
+                onClick={() => void exportAnalysisToXlsx(analysis, selectedSession?.title || 'تقرير التحليل المالي')}
                 className="px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-semibold border border-emerald-600 flex items-center gap-1.5 transition-all"
                 title="تصدير ملف Excel حقيقي متعدد الأوراق (.xlsx)"
               >
