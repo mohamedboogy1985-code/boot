@@ -8,9 +8,12 @@ import {
   HardDrive,
   Keyboard,
   Loader2,
+  Copy,
   MemoryStick,
+  Monitor,
   MousePointer2,
   Play,
+  Terminal,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
@@ -29,6 +32,7 @@ import type {
   AdaptersStateResponse,
   AdapterProposalResponse,
   AdapterExecuteResult,
+  AdapterActionProposal,
 } from '../types';
 import { ApiService } from '../services/api';
 import { NotificationService } from '../services/notificationService';
@@ -185,6 +189,26 @@ export const AdaptersPanel: React.FC = () => {
   const [preset, setPreset] = useState('chrome');
   const [timeoutMs, setTimeoutMs] = useState(10000);
   const [configMsg, setConfigMsg] = useState<string | null>(null);
+  const [copiedCommand, setCopiedCommand] = useState('');
+  const [wizardBusy, setWizardBusy] = useState<'mouse' | 'keyboard' | null>(null);
+  const [wizardMessage, setWizardMessage] = useState<string | null>(null);
+  const [realConfirmations, setRealConfirmations] = useState<Record<string, boolean>>({});
+  const [keyboardTestValue, setKeyboardTestValue] = useState('');
+  const keyboardTestRef = useRef<HTMLInputElement | null>(null);
+
+  const pageIsLocal =
+    typeof window !== 'undefined' && ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
+  const desktopAdapterMode = state?.adapters.find((a) => a.id === 'mouse')?.mode;
+  const realDesktopReady = Boolean(
+    state?.desktopAdaptersEnabled &&
+      state?.nutJsInstalled &&
+      state?.requestIsLoopback &&
+      pageIsLocal &&
+      desktopAdapterMode === 'enabled',
+  );
+  const needsRealConfirmation = (action: AdapterActionProposal) =>
+    (action.adapter === 'mouse' || action.adapter === 'keyboard') &&
+    state?.adapters.find((a) => a.id === action.adapter)?.mode === 'enabled';
 
   const loadState = async () => {
     try {
@@ -209,6 +233,7 @@ export const AdaptersPanel: React.FC = () => {
       setProposal(p);
       setResults([]);
       setRejected({});
+      setRealConfirmations({});
       setEditedParams(
         Object.fromEntries(p.actions.map((a) => [a.id, JSON.stringify(a.params, null, 0)])),
       );
@@ -230,8 +255,9 @@ export const AdaptersPanel: React.FC = () => {
       setError('صيغة JSON للمعاملات غير صالحة — صحّحها قبل التنفيذ.');
       return;
     }
+    const isRealDesktopAction = needsRealConfirmation(original);
     const ok = window.confirm(
-      `موافقة نهائية؟\nسيتم تنفيذ ${ADAPTER_LABELS[original.adapter]}.${original.action} بالمعاملات:\n${JSON.stringify(params)}\n\nلن يتم تنفيذ أي إجراء آخر تلقائيًا.`,
+      `${isRealDesktopAction ? '⚠️ تنفيذ حقيقي على جهازك (ليس معاينة). راجع النافذة المركّزة والمعاملات قبل التأكيد.\n' : ''}موافقة نهائية؟\nسيتم تنفيذ ${ADAPTER_LABELS[original.adapter]}.${original.action} بالمعاملات:\n${JSON.stringify(params)}\n\nلن يتم تنفيذ أي إجراء آخر تلقائيًا.`,
     );
     if (!ok) return;
     setExecutingId(actionId);
@@ -261,6 +287,139 @@ export const AdaptersPanel: React.FC = () => {
       setConfigMsg('تعذر حفظ تهيئة المتصفح.');
     }
   };
+
+  const copyCommand = async (key: string, command: string) => {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopiedCommand(key);
+      window.setTimeout(() => {
+        setCopiedCommand((current) => (current === key ? '' : current));
+      }, 2000);
+    } catch {
+      setWizardMessage('تعذر النسخ التلقائي في هذا المتصفح — حدّد نص الأمر يدويًا ثم انسخه.');
+    }
+  };
+
+  const runWizardTest = async (kind: 'mouse' | 'keyboard') => {
+    const testAction: AdapterActionProposal =
+      kind === 'mouse'
+        ? {
+            id: `wizard-mouse-${Date.now()}`,
+            adapter: 'mouse',
+            action: 'move',
+            params: { x: 300, y: 300 },
+            rationale: 'اختبار إعداد آمن: تحريك المؤشر فقط دون أي نقر.',
+            riskLevel: 'low',
+            status: 'awaiting-approval',
+          }
+        : {
+            id: `wizard-keyboard-${Date.now()}`,
+            adapter: 'keyboard',
+            action: 'type',
+            params: { text: 'ChatterBots desktop test ✓' },
+            rationale: 'اختبار إعداد آمن: كتابة نص ثابت داخل حقل الاختبار في هذه الصفحة.',
+            riskLevel: 'low',
+            status: 'awaiting-approval',
+          };
+
+    const modeWarning = realDesktopReady
+      ? '⚠️ التنفيذ الحقيقي مفعّل: سيصل هذا الإجراء فعليًا إلى جهازك.'
+      : 'سيعمل هذا الاختبار الآن في وضع المعاينة الآمن Dry-Run لأن شروط التنفيذ الحقيقي غير مكتملة.';
+    const detail =
+      kind === 'mouse'
+        ? 'سيتحرك المؤشر إلى (300, 300) دون نقر أو فتح أي شيء.'
+        : 'ستتم كتابة نص الاختبار الثابت داخل الحقل الآمن أدناه. بعد الموافقة لا تغيّر تركيز النافذة حتى ينتهي الاختبار.';
+    if (!window.confirm(`${modeWarning}\n\n${detail}\n\nهل توافق على هذا الإجراء الواحد فقط؟`)) return;
+
+    setWizardBusy(kind);
+    setWizardMessage(null);
+    setError(null);
+    try {
+      if (kind === 'keyboard') {
+        setKeyboardTestValue('');
+        keyboardTestRef.current?.focus();
+        await new Promise((resolve) => window.setTimeout(resolve, 150));
+      }
+      const result = await ApiService.executeAdapterAction(testAction, true);
+      setResults((prev) => [{ id: testAction.id, result }, ...prev]);
+      setWizardMessage(
+        result.summary +
+          (kind === 'keyboard' && result.executed ? ' تحقق من ظهور النص داخل حقل الاختبار.' : ''),
+      );
+      void loadState();
+    } catch (e: any) {
+      setWizardMessage(e?.message || 'تعذر تشغيل اختبار إعداد سطح المكتب.');
+    } finally {
+      setWizardBusy(null);
+    }
+  };
+
+  const setupSteps = [
+    {
+      done: pageIsLocal,
+      title: 'افتح التطبيق من نفس جهاز ويندوز',
+      detail: pageIsLocal
+        ? 'تم: هذه الصفحة مفتوحة محليًا.'
+        : 'هذه الصفحة ليست localhost. النشر السحابي لا يمكنه تحريك فأرة جهازك؛ شغّل المشروع محليًا وافتح http://localhost:3000.',
+    },
+    {
+      done: Boolean(state?.requestIsLoopback),
+      title: 'الخادم يرى الطلب كطلب Loopback',
+      detail: state
+        ? state.requestIsLoopback
+          ? 'تم: الطلب قادم من نفس الجهاز الذي يعمل عليه الخادم.'
+          : 'الطلب الحالي لا يبدو قادمًا من نفس الجهاز، وسيظل التنفيذ الحقيقي محظورًا أمنيًا.'
+        : 'جارٍ قراءة حالة الخادم…',
+    },
+    {
+      done: Boolean(state?.nutJsInstalled),
+      title: 'تثبيت محرك الإدخال الاختياري',
+      detail: state?.nutJsInstalled
+        ? 'تم: ‎@nut-tree/nut-js‎ مثبت على الخادم المحلي.'
+        : 'ثبّت ‎@nut-tree/nut-js‎ مرة واحدة داخل مجلد المشروع على جهازك.',
+    },
+    {
+      done: Boolean(state?.desktopAdaptersEnabled),
+      title: 'السماح الصريح من مشغّل الجهاز',
+      detail: state?.desktopAdaptersEnabled
+        ? 'تم: ‎ENABLE_DESKTOP_ADAPTERS=true‎.'
+        : 'عيّن ‎ENABLE_DESKTOP_ADAPTERS=true‎ ثم أعد تشغيل الخادم. لا تستخدم هذا الوضع على خادم عام أو شبكة مشتركة.',
+    },
+    {
+      done: realDesktopReady,
+      title: 'جاهزية التنفيذ الحقيقي المشروط بموافقتك',
+      detail:
+        'حتى عند اكتمال كل الشروط، كل إجراء يحتاج إقرارًا منفصلًا وتأكيدًا نهائيًا. تنفيذ أوامر النظاميبقى معطّلًا كليًا by design.',
+    },
+  ];
+
+  const setupCommands = [
+    {
+      id: 'clone',
+      label: '1) الحصول على المشروع وتثبيت تبعياته',
+      command: 'git clone https://github.com/mohamedboogy1985-code/boot.git\ncd boot\nnpm install',
+    },
+    {
+      id: 'nut',
+      label: '2) تثبيت محرك الفأرة/لوحة المفاتيح الاختياري',
+      command: 'npm i @nut-tree/nut-js',
+    },
+    {
+      id: 'env',
+      label: '3) أضف هذا السطر إلى ملف .env',
+      command: 'ENABLE_DESKTOP_ADAPTERS=true',
+    },
+    {
+      id: 'run',
+      label: '4) أو بدّل المتغير لجلسة PowerShell واحدة ثم شغّل',
+      command: '$env:ENABLE_DESKTOP_ADAPTERS="true"\nnpm run dev',
+    },
+    {
+      id: 'open',
+      label: '5) افتح التطبيق من نفس الجهاز فقط',
+      command: 'http://localhost:3000',
+    },
+  ];
 
   return (
     <div className="space-y-4">
@@ -306,6 +465,145 @@ export const AdaptersPanel: React.FC = () => {
             </div>
           ))}
         </div>
+      )}
+
+      {/* Local desktop-control setup wizard */}
+      {state && (
+        <section className="bg-slate-950/70 border border-slate-800 rounded-2xl p-4 space-y-4">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <h4 className="text-sm font-bold text-white flex items-center gap-2">
+              <Monitor className="w-4 h-4 text-cyan-400" />
+              <span>معالج تفعيل التحكم بسطح المكتب على جهازك</span>
+            </h4>
+            <button
+              type="button"
+              onClick={() => void loadState()}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-white text-[11px] font-bold flex items-center gap-1.5"
+            >
+              <RefreshCw className="w-3.5 h-3.5" /> إعادة فحص الجاهزية
+            </button>
+          </div>
+
+          <div
+            className={`p-3 rounded-xl border text-[11px] leading-6 font-bold ${
+              realDesktopReady
+                ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                : 'bg-amber-950/30 border-amber-500/30 text-amber-200'
+            }`}
+          >
+            {realDesktopReady ? (
+              <span className="flex items-start gap-2">
+                <ShieldCheck className="w-4 h-4 mt-1 shrink-0" />
+                التنفيذ الحقيقي جاهز على هذا الجهاز — لكنه ما يزال محصورًا بإقرار وموافقة منفصلين لكل إجراء، ولا يشمل أي تنفيذ أوامر نظام.
+              </span>
+            ) : (
+              <span className="flex items-start gap-2">
+                <ShieldAlert className="w-4 h-4 mt-1 shrink-0" />
+                أنت الآن في وضع المعاينة الآمن Dry-Run. أكمل الخطوات الناقصة أدناه على جهاز ويندوز الذي يعمل عليه الخادم، ثم أعد الفحص.
+              </span>
+            )}
+          </div>
+
+          <p className="text-[11px] leading-5 text-slate-400">
+            منصة الخادم: <b className="text-slate-200">{state.serverPlatform}</b> • الصفحة محلية:{' '}
+            <b className="text-slate-200">{pageIsLocal ? 'نعم' : 'لا'}</b> • الطلب Loopback:{' '}
+            <b className="text-slate-200">{state.requestIsLoopback ? 'نعم' : 'لا'}</b> • ‎nut.js‎:{' '}
+            <b className="text-slate-200">{state.nutJsInstalled ? 'مثبت' : 'غير مثبت'}</b> • إذن التشغيل:{' '}
+            <b className="text-slate-200">{state.desktopAdaptersEnabled ? 'true' : 'false'}</b>
+          </p>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-2.5">
+            {setupSteps.map((step, index) => (
+              <div key={step.title} className="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+                <div className="flex items-center gap-1.5 text-[11px] font-bold text-white">
+                  {step.done ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  ) : (
+                    <Clock3 className="w-4 h-4 text-amber-400 shrink-0" />
+                  )}
+                  <span>{index + 1}. {step.title}</span>
+                </div>
+                <p className="text-[10px] leading-5 text-slate-400 mt-1.5">{step.detail}</p>
+              </div>
+            ))}
+          </div>
+
+          <div className="space-y-2">
+            <h5 className="text-xs font-bold text-white flex items-center gap-1.5">
+              <Terminal className="w-3.5 h-3.5 text-cyan-400" /> أوامر الإعداد على ويندوز (راجعها ثم انسخها)
+            </h5>
+            {setupCommands.map((item) => (
+              <div key={item.id} className="rounded-xl bg-slate-900 border border-slate-800 overflow-hidden">
+                <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-800">
+                  <span className="text-[11px] font-bold text-slate-200">{item.label}</span>
+                  <button
+                    type="button"
+                    onClick={() => void copyCommand(item.id, item.command)}
+                    className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[10px] font-bold flex items-center gap-1"
+                  >
+                    <Copy className="w-3 h-3" /> {copiedCommand === item.id ? 'تم النسخ' : 'نسخ'}
+                  </button>
+                </div>
+                <pre dir="ltr" className="text-left whitespace-pre-wrap break-all px-3 py-2 text-[11px] leading-5 font-mono text-cyan-200">{item.command}</pre>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <div className="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2.5">
+              <h5 className="text-xs font-bold text-white flex items-center gap-1.5">
+                <MousePointer2 className="w-4 h-4 text-cyan-400" /> اختبار فأرة آمن — تحريك فقط
+              </h5>
+              <p className="text-[11px] leading-5 text-slate-400">
+                الاختبار المعتمد يحرك المؤشر إلى (300, 300) ولا ينقر ولا يفتح أي عنصر. في الوضع الحالي سيظهر في النتائج ما إذا كان تنفيذًا فعليًا أم معاينة.
+              </p>
+              <button
+                type="button"
+                disabled={wizardBusy !== null}
+                onClick={() => void runWizardTest('mouse')}
+                className="px-3.5 py-2 rounded-lg bg-cyan-700 hover:bg-cyan-600 disabled:opacity-50 text-white text-[11px] font-bold flex items-center gap-1.5"
+              >
+                {wizardBusy === 'mouse' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                {realDesktopReady ? 'الموافقة على تحريك حقيقي للتجربة' : 'تشغيل اختبار المعاينة'}
+              </button>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2.5">
+              <h5 className="text-xs font-bold text-white flex items-center gap-1.5">
+                <Keyboard className="w-4 h-4 text-cyan-400" /> اختبار لوحة مفاتيح آمن — حقل مخصص
+              </h5>
+              <input
+                ref={keyboardTestRef}
+                type="text"
+                value={keyboardTestValue}
+                onChange={(e) => setKeyboardTestValue(e.target.value)}
+                placeholder="حقل اختبار آمن — سيُركّز تلقائيًا قبل الكتابة"
+                className="w-full bg-slate-950 border border-cyan-500/40 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-400"
+              />
+              <p className="text-[11px] leading-5 text-slate-400">
+                سيُكتب نص ثابت واحد فقط. لا تغيّر النافذة أو التركيز أثناء الاختبار؛ وفي وضع المعاينة لن يُكتب أي حرف فعليًا.
+              </p>
+              <button
+                type="button"
+                disabled={wizardBusy !== null}
+                onClick={() => void runWizardTest('keyboard')}
+                className="px-3.5 py-2 rounded-lg bg-cyan-700 hover:bg-cyan-600 disabled:opacity-50 text-white text-[11px] font-bold flex items-center gap-1.5"
+              >
+                {wizardBusy === 'keyboard' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                {realDesktopReady ? 'الموافقة على كتابة حقيقية للتجربة' : 'تشغيل اختبار المعاينة'}
+              </button>
+            </div>
+          </div>
+
+          {wizardMessage && (
+            <p className="p-3 rounded-xl bg-cyan-950/40 border border-cyan-500/30 text-cyan-200 text-[11px] leading-5 font-bold">
+              {wizardMessage}
+            </p>
+          )}
+          <p className="text-[10px] leading-5 text-slate-500">
+            حدود لا تتغير: لا تنفيذ Shell أو PowerShell من الخادم، لا كتابة/حذف ملفات نظام، لا إجراءات متسلسلة تلقائيًا، ولا تنفيذ من جهاز آخر. أوقف الوضع الحقيقي في أي وقت بحذف المتغير أو ضبطه على false وإعادة تشغيل الخادم.
+          </p>
+        </section>
       )}
 
       {/* Browser setup */}
@@ -413,15 +711,34 @@ export const AdaptersPanel: React.FC = () => {
                   className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-[11px] font-mono text-cyan-200 focus:outline-none focus:border-cyan-500"
                   aria-label="معاملات الإجراء (JSON قابل للتحرير)"
                 />
+                {needsRealConfirmation(action) && (
+                  <label className="flex items-start gap-2 p-2.5 rounded-lg bg-rose-950/40 border border-rose-500/40 text-[11px] leading-5 text-rose-200 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(realConfirmations[action.id])}
+                      onChange={(e) =>
+                        setRealConfirmations((prev) => ({ ...prev, [action.id]: e.target.checked }))
+                      }
+                      className="mt-1 w-4 h-4 accent-rose-500 shrink-0"
+                    />
+                    <span>
+                      <b>إقرار تنفيذ حقيقي:</b> أفهم أن هذا الإجراء سيحرّك الفأرة أو يكتب فعليًا في النافذة المركّزة على جهازي، وقد راجعت المعاملات أعلاه. هذا الإقرار يخص هذا الإجراء فقط ولا يمنح أي صلاحية دائمة.
+                    </span>
+                  </label>
+                )}
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    disabled={executingId === action.id || rejected[action.id]}
+                    disabled={
+                      executingId === action.id ||
+                      rejected[action.id] ||
+                      (needsRealConfirmation(action) && !realConfirmations[action.id])
+                    }
                     onClick={() => void handleApproveExecute(action.id)}
                     className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-[11px] font-bold flex items-center gap-1.5"
                   >
                     {executingId === action.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-                    أوافق — نفّذ هذا الإجراء فقط
+                    {needsRealConfirmation(action) ? 'أوافق — نفّذ فعليًا هذا الإجراء فقط' : 'أوافق — نفّذ هذا الإجراء فقط'}
                   </button>
                   <button
                     type="button"

@@ -5,19 +5,10 @@
  * (SheetJS) and `docx`, replacing the previous CSV/JSON-only export path
  * for the financial transcript analysis.
  */
-import * as XLSX from 'xlsx';
-import {
-  Document,
-  Packer,
-  Paragraph,
-  TextRun,
-  HeadingLevel,
-  Table,
-  TableRow,
-  TableCell,
-  WidthType,
-  AlignmentType,
-} from 'docx';
+// Heavy Office libraries are intentionally loaded only when an export is
+// requested, keeping them out of the initial application bundle.
+type XlsxModule = typeof import('xlsx');
+type DocxModule = typeof import('docx');
 import type {
   TranscriptFinancialAnalysis,
   FinancialItem,
@@ -45,7 +36,7 @@ function sanitizeFileBase(name: string): string {
   return cleaned.slice(0, 60) || 'financial-report';
 }
 
-function sheetFromItems(items: FinancialItem[], fallbackLabel: string): XLSX.WorkSheet {
+function sheetFromItems(XLSX: XlsxModule, items: FinancialItem[], fallbackLabel: string) {
   const rows =
     items.length > 0
       ? items.map((i) => ({
@@ -79,10 +70,11 @@ function sheetFromItems(items: FinancialItem[], fallbackLabel: string): XLSX.Wor
  * Export a financial transcript analysis as a real multi-sheet .xlsx workbook:
  * summary / expenses / revenues / tax deductions / all transactions.
  */
-export function exportAnalysisToXlsx(
+export async function exportAnalysisToXlsx(
   analysis: TranscriptFinancialAnalysis,
   title = 'تقرير التحليل المالي',
-): void {
+): Promise<void> {
+  const XLSX = await import('xlsx');
   const wb = XLSX.utils.book_new();
 
   const summaryRows = [
@@ -117,12 +109,12 @@ export function exportAnalysisToXlsx(
 
   XLSX.utils.book_append_sheet(
     wb,
-    sheetFromItems(analysis.expenses, 'لا توجد مصروفات مرصودة'),
+    sheetFromItems(XLSX, analysis.expenses, 'لا توجد مصروفات مرصودة'),
     'المصروفات',
   );
   XLSX.utils.book_append_sheet(
     wb,
-    sheetFromItems(analysis.revenues, 'لا توجد إيرادات مرصودة'),
+    sheetFromItems(XLSX, analysis.revenues, 'لا توجد إيرادات مرصودة'),
     'الإيرادات',
   );
 
@@ -142,7 +134,7 @@ export function exportAnalysisToXlsx(
 
   XLSX.utils.book_append_sheet(
     wb,
-    sheetFromItems(analysis.transactions, 'لا توجد معاملات مرصودة'),
+    sheetFromItems(XLSX, analysis.transactions, 'لا توجد معاملات مرصودة'),
     'كل المعاملات',
   );
 
@@ -155,7 +147,8 @@ export function exportAnalysisToXlsx(
   );
 }
 
-function itemsTable(items: FinancialItem[]): Table {
+function itemsTable(docx: DocxModule, items: FinancialItem[]) {
+  const { Paragraph, TextRun, Table, TableRow, TableCell, WidthType, AlignmentType } = docx;
   const header = new TableRow({
     children: ['الوصف', 'النوع', 'المبلغ', 'العملة', 'الفئة', 'التاريخ'].map(
       (h) =>
@@ -197,7 +190,9 @@ export async function exportAnalysisToDocx(
   analysis: TranscriptFinancialAnalysis,
   title = 'تقرير التحليل المالي',
 ): Promise<void> {
-  const children: (Paragraph | Table)[] = [
+  const docx = await import('docx');
+  const { Document, Packer, Paragraph, TextRun, HeadingLevel } = docx;
+  const children: Array<InstanceType<DocxModule['Paragraph']> | InstanceType<DocxModule['Table']>> = [
     new Paragraph({ text: title, heading: HeadingLevel.TITLE }),
     new Paragraph({
       children: [
@@ -234,11 +229,11 @@ export async function exportAnalysisToDocx(
     }),
     new Paragraph({ text: 'المصروفات', heading: HeadingLevel.HEADING_1 }),
   );
-  if (analysis.expenses.length > 0) children.push(itemsTable(analysis.expenses));
+  if (analysis.expenses.length > 0) children.push(itemsTable(docx, analysis.expenses));
   else children.push(new Paragraph({ children: [new TextRun('لا توجد مصروفات مرصودة.')] }));
 
   children.push(new Paragraph({ text: 'الإيرادات', heading: HeadingLevel.HEADING_1 }));
-  if (analysis.revenues.length > 0) children.push(itemsTable(analysis.revenues));
+  if (analysis.revenues.length > 0) children.push(itemsTable(docx, analysis.revenues));
   else children.push(new Paragraph({ children: [new TextRun('لا توجد إيرادات مرصودة.')] }));
 
   children.push(new Paragraph({ text: 'رؤى الخصومات الضريبية', heading: HeadingLevel.HEADING_1 }));
@@ -280,7 +275,9 @@ export async function exportAnalysisToDocx(
 export async function exportSessionTranscriptToDocx(
   session: ConversationSession,
 ): Promise<void> {
-  const children: Paragraph[] = [
+  const docx = await import('docx');
+  const { Document, Packer, Paragraph, TextRun, HeadingLevel } = docx;
+  const children: Array<InstanceType<DocxModule['Paragraph']>> = [
     new Paragraph({ text: session.title, heading: HeadingLevel.TITLE }),
     new Paragraph({
       children: [

@@ -16,7 +16,8 @@ import {
   AdaptersStateResponse,
   AdapterProposalResponse,
   AdapterExecuteResult,
-  AdapterActionProposal
+  AdapterActionProposal,
+  InvoiceExtractionResult
 } from '../types';
 
 export interface ChatResponse {
@@ -222,6 +223,27 @@ export const ApiService = {
 
     const data = await res.json();
     return data.analysis;
+  },
+
+  // Structured extraction of one invoice image/PDF into an editable draft.
+  async extractInvoice(
+    fileBase64: string,
+    mimeType: string,
+    fileName: string,
+    currency: CurrencyCode = 'EGP'
+  ): Promise<InvoiceExtractionResult> {
+    const res = await fetch('/api/extract-invoice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileBase64, mimeType, fileName, currency }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Invoice extraction failed' }));
+      throw new Error(err.error || 'Invoice extraction failed');
+    }
+
+    return await res.json();
   },
 
   // Send message to ChatterBot

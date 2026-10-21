@@ -1,0 +1,25 @@
+# Render Blueprint — one-click deploy of ChatterBots Remix.
+# After connecting this GitHub repo in Render, every merge to main
+# auto-deploys (autoDeploy: true). Render provides HTTPS (required
+# for camera/microphone) and injects $PORT automatically.
+services:
+  - type: web
+    name: chatterbots-remix
+    env: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/status
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Paste your key in the Render dashboard (never commit it).
+      - key: GEMINI_API_KEY
+        sync: false
+      # Desktop input adapters are LOCAL-ONLY by design: keep OFF in cloud.
+      - key: ENABLE_DESKTOP_ADAPTERS
+        value: "false"
+      # Ollama is local-only too; leave unset in cloud (graceful offline).
+      - key: OLLAMA_HOST
+        value: "http://localhost:11434"

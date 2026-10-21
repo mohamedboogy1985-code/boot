@@ -68,3 +68,9 @@ npm run lint         # فحص TypeScript (0 أخطاء)
 يقوم GitHub Actions عند كل Push/PR بـ: تثبيت نظيف (`npm install` بدون أعلام)، فحص TypeScript، بناء إنتاج، واختبار دخان للخادم يشمل التأكد من تعطيل تنفيذ Shell وحظر أي إجراء محوّل بدون موافقة المستخدم.
 
 للمزيد: انظر تقرير الدمج والفحص في `docs/PROJECT_REVIEW_REPORT.md`.
+
+## النشر أونلاين بدومين عام
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/mohamedboogy1985-code/boot)
+
+المشروع مهيأ للنشر بضغطة واحدة: `render.yaml` (Render مع نشر تلقائي عند كل دمج في `main`)، و`railway.toml` (Railway)، و`Dockerfile` لأي خادم. الدليل الكامل خطوة بخطوة — بما فيه ربط دومين مخصص، ومتغيرات البيئة، وما يعمل سحابيًا مقابل ما يظل محليًا (الفأرة/Ollama) — في [`docs/DEPLOY.md`](docs/DEPLOY.md).
